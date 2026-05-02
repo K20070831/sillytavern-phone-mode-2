@@ -1,0 +1,54 @@
+// === 手机端诊断补丁 v1 ===
+(function () {
+    // 1. 给 __pmOpen 加全局错误捕获，错误会用屏幕弹窗显示
+    const oldOpen = window.__pmOpen;
+    window.__pmOpen = function () {
+        try {
+            const ret = oldOpen.apply(this, arguments);
+
+            // 2. 强制居中显示，无论原本定位到哪
+            setTimeout(() => {
+                const el = document.getElementById('pm-iphone');
+                if (!el) {
+                    showDiag('❌ 手机 DOM 未创建：__pmOpen 内部抛错', '请截图此弹窗发给作者');
+                    return;
+                }
+                el.style.setProperty('left', '50%', 'important');
+                el.style.setProperty('top', '50%', 'important');
+                el.style.setProperty('right', 'auto', 'important');
+                el.style.setProperty('bottom', 'auto', 'important');
+                el.style.setProperty('transform', 'translate(-50%, -50%)', 'important');
+                el.style.setProperty('z-index', '2147483647', 'important');
+
+                const rect = el.getBoundingClientRect();
+                const vw = window.innerWidth, vh = window.innerHeight;
+                showDiag(
+                    '✅ 手机已强制居中',
+                    `视口 ${vw}×${vh}\n手机位置 (${rect.left|0}, ${rect.top|0})\n手机尺寸 ${rect.width|0}×${rect.height|0}\n如果还是看不见请截图`
+                );
+            }, 200);
+
+            return ret;
+        } catch (e) {
+            showDiag('❌ __pmOpen 抛错', String(e.message || e) + '\n\n' + (e.stack || '').slice(0, 300));
+            throw e;
+        }
+    };
+
+    function showDiag(title, body) {
+        const old = document.getElementById('pm-diag');
+        if (old) old.remove();
+        const d = document.createElement('div');
+        d.id = 'pm-diag';
+        d.style.cssText = `position:fixed;top:10px;left:10px;right:10px;z-index:2147483647;
+            background:#fff8e1;border:2px solid #ff9500;border-radius:12px;padding:12px;
+            font:13px/1.5 -apple-system,sans-serif;color:#333;box-shadow:0 4px 16px rgba(0,0,0,.3);
+            white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow-y:auto;`;
+        d.innerHTML = `<b style="color:#ff6b00">${title}</b><br><br>${body}<br><br>
+            <button onclick="this.parentNode.remove()" style="background:#007aff;color:#fff;
+            border:none;border-radius:8px;padding:6px 14px;font-size:13px;">关闭</button>`;
+        document.body.appendChild(d);
+    }
+
+    console.log('[phone-mode-diag] 已加载');
+})();
