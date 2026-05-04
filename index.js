@@ -457,17 +457,22 @@
     groupMembers.forEach(n => memberMap.set(normName(n), n));
     const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
     const stripAllPrefix = (s) => {
-        let t = (s || '').trim();
-        for (let i = 0; i < 3; i++) {
-            const m = t.match(speakerRe);
-            if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
-            else break;
-        }
-        const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
-        if (outer && memberMap.has(normName(outer[1]))) t = outer[2].trim();
-        t = t.replace(/[\)）]+\s*$/, '').trim();
-        return t;
-    };
+        let t = (s || '').trim();
+        // 1. 优先处理全包裹的违规格式，如 (小明：你好)，直接提取出“你好”
+        const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
+        if (outer && memberMap.has(normName(outer[1]))) {
+            t = outer[2].trim();
+        } else {
+            // 2. 如果不是全包裹，再处理常规前缀，如 小明：你好
+            for (let i = 0; i < 3; i++) {
+                const m = t.match(speakerRe);
+                if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
+                else break;
+            }
+        }
+        return t;
+    };
+   
     for (const line of lines) {
         const m = line.match(speakerRe);
         if (m && memberMap.has(normName(m[1]))) {
