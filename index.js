@@ -440,42 +440,50 @@
 
     // 🔧 强化群聊解析
     function parseGroupResponse(raw) {
-    // 先补全未闭合的括号
-        const cleaned = cleanResponse(fixUnclosedSpecial(raw));
-        const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
-        const result = [];
-        const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
-        const memberMap = new Map();
-        groupMembers.forEach(n => memberMap.set(normName(n), n));
-        const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
-        const stripAllPrefix = (s) => {
-            let t = (s || '').trim();
-            for (let i = 0; i < 3; i++) {
-                const m = t.match(speakerRe);
-                if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
-                else break;
-            }
-            const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
-            if (outer && memberMap.has(normName(outer[1]))) t = outer[2].trim();
-            t = t.replace(/[\)）]+\s*$/, '').trim();
-            return t;
-        };
-        for (const line of lines) {
-            const m = line.match(speakerRe);
-            if (m && memberMap.has(normName(m[1]))) {
-                const name = memberMap.get(normName(m[1]));
-                const sentences = m[2].split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
-                if (sentences.length) result.push({ name, sentences });
-            } else {
-                const sentences = line.split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
-                if (sentences.length) {
-                    if (result.length > 0) result[result.length - 1].sentences.push(...sentences);
-                    else result.push({ name: groupMembers[0] || '???', sentences });
-                }
+    // cleanResponse 先清理标签，再补括号
+    let cleaned = cleanResponse(raw);
+    // 补全每行未闭合的括号
+    cleaned = cleaned.split('\n').map(line => {
+        const opens = (line.match(/[（(]/g) || []).length;
+        const closes = (line.match(/[）)]/g) || []).length;
+        if (opens > closes) return line + '）'.repeat(opens - closes);
+        return line;
+    }).join('\n');
+
+    const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
+    const result = [];
+    const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
+    const memberMap = new Map();
+    groupMembers.forEach(n => memberMap.set(normName(n), n));
+    const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
+    const stripAllPrefix = (s) => {
+        let t = (s || '').trim();
+        for (let i = 0; i < 3; i++) {
+            const m = t.match(speakerRe);
+            if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
+            else break;
+        }
+        const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
+        if (outer && memberMap.has(normName(outer[1]))) t = outer[2].trim();
+        t = t.replace(/[\)）]+\s*$/, '').trim();
+        return t;
+    };
+    for (const line of lines) {
+        const m = line.match(speakerRe);
+        if (m && memberMap.has(normName(m[1]))) {
+            const name = memberMap.get(normName(m[1]));
+            const sentences = m[2].split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
+            if (sentences.length) result.push({ name, sentences });
+        } else {
+            const sentences = line.split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
+            if (sentences.length) {
+                if (result.length > 0) result[result.length - 1].sentences.push(...sentences);
+                else result.push({ name: groupMembers[0] || '???', sentences });
             }
         }
-        return result;
     }
+    return result;
+}
     async function fetchSMS(userMsg) {
         const c = getCtx();
         conversationHistory.push({ role: 'user', content: userMsg });
