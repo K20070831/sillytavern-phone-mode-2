@@ -120,11 +120,9 @@
         ov.addEventListener('click', e => { if (e.target === ov) { ov.remove(); window.__pmShowConfig(); } });
         document.body.appendChild(ov);
         if (ov.showPopover) try { ov.showPopover(); } catch {}
-
         const frame = ov.querySelector('#pm-crop-frame'), img = ov.querySelector('#pm-crop-img');
         const zoomSlider = ov.querySelector('#pm-crop-zoom');
         let tx = 0, ty = 0, scale = 1, frameW = 0, frameH = 0, baseW = 0, baseH = 0;
-
         img.onload = () => {
             const cw = frame.clientWidth;
             frameW = cw; frameH = cw / ratio; frame.style.height = frameH + 'px';
@@ -166,7 +164,6 @@
             scale = Math.max(1, Math.min(4, scale + (e.deltaY > 0 ? -0.1 : 0.1)));
             zoomSlider.value = Math.round(scale * 100); updateTransform();
         });
-
         ov.querySelector('#pm-crop-confirm').onclick = () => {
             const canvas = document.createElement('canvas');
             const outW = 600, outH = Math.round(outW / ratio);
@@ -187,7 +184,7 @@
         '语音':'语音','voice':'语音','Voice':'语音','VOICE':'语音','audio':'语音',
     };
     const KW_PATTERN = Object.keys(SPECIAL_KEYWORDS).join('|');
-    const SPECIAL_RE = new RegExp(`[\\(（]\\s*(${KW_PATTERN})\\s*[+:\\s]*([^)）]+)[\\)）]`, 'gi');
+    const SPECIAL_RE = new RegExp(`[\\(（]\\s*(${KW_PATTERN})\\s*[+：:\\s]*([^)）]+)[\\)）]`, 'gi');
     function normalizeKeyword(k) { return SPECIAL_KEYWORDS[k] || SPECIAL_KEYWORDS[k.toLowerCase()] || k; }
 
     function getStorageId() {
@@ -322,10 +319,10 @@
         handle.addEventListener('touchstart', onStart, { passive: false }); window.addEventListener('touchmove', onMove, { passive: false }); window.addEventListener('touchend', onEnd);
     }
 
-    function escapeHtml(s) { return (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-    function escapeAttr(s) { return (s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+    function escapeHtml(s) { return (s || '').replace(/</g, '<').replace(/>/g, '>'); }
+    function escapeAttr(s) { return (s || '').replace(/"/g, '"').replace(/</g, '<'); }
 
-    // 🔧 颜色查找兜底 - 大小写不敏感 + 索引匹配
+    // 🔧 颜色查找兜底
     function resolveGroupColor(name) {
         if (!name) return null;
         if (groupColorMap[name]) return groupColorMap[name];
@@ -422,18 +419,15 @@
         return (str || '').split(/\s*\/\s*/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 8);
     }
 
-    // 🔧 超强群聊解析 - 多层剥离装饰符号
+    // 🔧 强化群聊解析
     function parseGroupResponse(raw) {
         const cleaned = cleanResponse(raw);
         const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
         const result = [];
-
         const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
         const memberMap = new Map();
         groupMembers.forEach(n => memberMap.set(normName(n), n));
-
         const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
-
         const stripAllPrefix = (s) => {
             let t = (s || '').trim();
             for (let i = 0; i < 3; i++) {
@@ -446,7 +440,6 @@
             t = t.replace(/[\)）]+\s*$/, '').trim();
             return t;
         };
-
         for (const line of lines) {
             const m = line.match(speakerRe);
             if (m && memberMap.has(normName(m[1]))) {
@@ -463,7 +456,6 @@
         }
         return result;
     }
-
     async function fetchSMS(userMsg) {
         const c = getCtx();
         conversationHistory.push({ role: 'user', content: userMsg });
@@ -804,6 +796,7 @@
         showGroupForm('edit', groupDisplayName, groupMembers);
     };
 
+    // ── 设置弹窗 ──
     window.__pmShowConfig = () => {
         loadProfiles(); loadTheme(); loadBgSettings();
         const cfg = window.__pmConfig, t = window.__pmTheme;
@@ -821,7 +814,6 @@
         ).join('');
         const id = getStorageId(), localKey = `${id}_${currentPersona}`;
         const hasGlobalBg = !!window.__pmBgGlobal, hasLocalBg = !!window.__pmBgLocal[localKey];
-
         const globalBgBtn = hasGlobalBg
             ? `<button class="pm-bg-btn pm-bg-del" onclick="window.__pmClearBg('global')">清除</button>`
             : `<label class="pm-bg-btn">选择图片<input type="file" accept="image/*" onchange="window.__pmUploadBg(this,'global')" hidden></label>
@@ -1019,14 +1011,12 @@
         document.getElementById('pm-overlay')?.remove();
         addNote(`已保存：${window.__pmConfig.useIndependent && apiUrl ? '独立API' : '主API'}`);
     };
-
     window.__pmShowList = () => {
         const id = getStorageId();
         loadGroupMeta();
         const histories = window.__pmHistories[id] || {};
         const groups = window.__pmGroupMeta[id] || {};
         const checked = window.__pmBidirectional[id] || [];
-
         const singleList = Object.keys(histories).filter(k => !k.startsWith('__group_'));
         const groupList = Object.keys(groups);
 
@@ -1126,7 +1116,6 @@
             const nameEl = phoneWindow.querySelector('.pm-name');
             const editBtn = phoneWindow.querySelector('.pm-name-edit');
             if (isGroupChat) {
-                // 🔧 超过5字截断
                 const display = groupDisplayName || name;
                 const arr = [...display];
                 nameEl.textContent = arr.length > 5 ? arr.slice(0, 5).join('') + '...' : display;
@@ -1248,6 +1237,7 @@
         applyBidirectionalInjection(); ensureVisibility();
     };
 
+    // ══════════════════════ CSS ══════════════════════
     if (!document.getElementById('pm-css')) {
         const s = document.createElement('style'); s.id = 'pm-css';
         s.textContent = `
@@ -1271,7 +1261,6 @@
 .pm-navbar{position:relative;display:flex !important;align-items:center;padding:6px 10px;border-bottom:1px solid #f0f0f0;flex-shrink:0;min-height:38px;}
 .pm-nav-left-btn{margin-right:auto;}
 .pm-nav-right{display:flex;gap:4px;justify-content:flex-end;margin-left:auto;}
-/* 🔧 标题绝对居中 + 铅笔挂外侧不影响居中 */
 .pm-name-wrap{position:absolute !important;left:50%;top:50%;transform:translate(-50%,-50%);display:inline-flex;align-items:center;max-width:60%;pointer-events:auto;}
 .pm-name{font-weight:700 !important;color:#000 !important;font-size:15px !important;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
 .pm-name-edit{background:#f0f0f3 !important;border:none !important;color:#666 !important;cursor:pointer;padding:5px !important;line-height:1;flex-shrink:0;border-radius:50% !important;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;transition:all .2s;position:absolute;left:100%;margin-left:8px;}
