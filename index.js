@@ -403,17 +403,30 @@
         const txt = el.parentElement?.querySelector('.pm-voice-text');
         if (txt) txt.style.display = txt.style.display === 'none' ? 'block' : 'none';
     };
-
+    
+    function fixUnclosedSpecial(text) {
+    if (!text) return text;
+    return text.split('\n').map(line => {
+        // 这一行出现了特殊格式开头，但没有闭合括号
+        const m = line.match(/[\(（]\s*(转账|收款|图片|语音|transfer|receive|image|voice|img|pic|photo|audio|收钱|收到)\s*[+：:]/i);
+        if (m && !/[\)）]/.test(line.slice(line.indexOf(m[0])))) {
+            return line + '）';
+        }
+        return line;
+    }).join('\n');
+}
     function cleanResponse(raw) {
-        return (raw ?? '')
-            .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-            .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<reflection>[\s\S]*?<\/reflection>/gi, '')
-            .replace(/<inner_thought>[\s\S]*?<\/inner_thought>/gi, '')
-            .replace(/<scene>[\s\S]*?<\/scene>/gi, '').replace(/<narration>[\s\S]*?<\/narration>/gi, '')
-            .replace(/<action>[\s\S]*?<\/action>/gi, '').replace(/```[\s\S]*?```/g, '')
-            .replace(/^.*【[^】]{2,}】.*$/gm, '').replace(/---+[\s\S]*$/g, '')
-            .replace(/<[^>]+>/g, '').trim();
-    }
+    let s = fixUnclosedSpecial(raw ?? '');
+    return s
+        .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<reflection>[\s\S]*?<\/reflection>/gi, '')
+        .replace(/<inner_thought>[\s\S]*?<\/inner_thought>/gi, '')
+        .replace(/<scene>[\s\S]*?<\/scene>/gi, '').replace(/<narration>[\s\S]*?<\/narration>/gi, '')
+        .replace(/<action>[\s\S]*?<\/action>/gi, '').replace(/```[\s\S]*?```/g, '')
+        .replace(/^.*【[^】]{2,}】.*$/gm, '').replace(/---+[\s\S]*$/g, '')
+        .replace(/<[^>]+>/g, '').trim();
+}
+
 
     function splitToSentences(str) {
         return (str || '').split(/\s*\/\s*/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 8);
@@ -478,30 +491,27 @@
 群聊成员：${memberList}
 你同时扮演以上所有角色与用户聊天。
 
-输出格式（极其严格，违反将被丢弃）：
-角色名：消息1 / 消息2
-另一角色名：消息3
-角色名：消息4
+⚠️ 输出必须满足以下全部条件，违反即视为无效：
+1. 每一行都必须以 "角色名：" 开头（角色名必须来自：${memberList}）
+2. 严禁输出对界面、系统、对话本身的总结或描述性文字
+3. 严禁输出类似"现在应该..."、"我已经..."、"看起来..."这类叙述性句子
+4. 特殊格式必须在同一行内完整写出且闭合：(转账+金额) (收款+金额) (图片+描述) (语音+内容)
+5. 特殊格式括号内严禁换行、编号（1. 2. 3.）、列表
+6. 每条消息内的 / 只用于分隔同一角色的多条短信
+7. 每个角色0-8句，可穿插发言，不必所有人都说话
+8. 严禁英文格式 (Voice+/Image+/Transfer+)
 
-规则：
-- 角色名后面只能跟该角色实际说出的话，不可以再嵌套"角色名：xxx"
-- 严禁出现 "(角色名：xxx)"、"（角色名：xxx）" 这种括号嵌套写法
-- 每条消息内的"/"只用于分隔同一角色的多条短信
-- 根据剧情和人设决定谁发言，可穿插
-- 每个角色每次0-8句
-- 不是所有角色都必须发言
-- 禁止旁白心理描写场景描述
-- 特殊格式（中文）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)
-- 严禁英文格式
-
-正确示例：
+✅ 正确示例：
 小明：我先到了 / 这家店真不错
-小红：等我五分钟
-小明：好的
+小红：等我五分钟 / (语音+马上到别急)
+小明：好 / (图片+刚拍的店门口)
 
-错误示例（严禁）：
-小明：(小明：我先到了)
-小红：小红：等我五分钟`;
+❌ 错误示例（绝对禁止）：
+小明：(语音+内容有换行
+1. 第一点
+2. 第二点)
+小红：界面现在应该正常了，顶部标题居中显示...`;
+
             injectedInstruction = `${groupRules}\n\n${cardScenario ? '【场景】\n' + cardScenario + '\n\n' : ''}${worldBookText ? '【世界书】\n' + worldBookText + '\n\n' : ''}群聊历史：\n${smsHistoryText}\n\n用户：${userMsg}`;
             systemPrompt = [
                 `你同时扮演 ${memberList} 在群聊「${groupName}」中与用户对话。`,
