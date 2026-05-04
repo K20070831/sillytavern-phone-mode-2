@@ -180,7 +180,6 @@
         };
     }
 
-    // 🆕 9: 加入收款关键词
     const SPECIAL_KEYWORDS = {
         '转账':'转账','transfer':'转账','Transfer':'转账','TRANSFER':'转账',
         '收款':'收款','receive':'收款','Receive':'收款','RECEIVE':'收款','收钱':'收款','收到':'收款',
@@ -188,7 +187,7 @@
         '语音':'语音','voice':'语音','Voice':'语音','VOICE':'语音','audio':'语音',
     };
     const KW_PATTERN = Object.keys(SPECIAL_KEYWORDS).join('|');
-    const SPECIAL_RE = new RegExp(`[\\(（]\\s*(${KW_PATTERN})\\s*[+：:\\s]*([^)）]+)[\\)）]`, 'gi');
+    const SPECIAL_RE = new RegExp(`[\\(（]\\s*(${KW_PATTERN})\\s*[+:\\s]*([^)）]+)[\\)）]`, 'gi');
     function normalizeKeyword(k) { return SPECIAL_KEYWORDS[k] || SPECIAL_KEYWORDS[k.toLowerCase()] || k; }
 
     function getStorageId() {
@@ -254,7 +253,6 @@
     function loadBidirectional() { try { window.__pmBidirectional = JSON.parse(localStorage.getItem('ST_SMS_BIDIRECTIONAL')) || {}; } catch { window.__pmBidirectional = {}; } }
     function saveBidirectional() { try { localStorage.setItem('ST_SMS_BIDIRECTIONAL', JSON.stringify(window.__pmBidirectional)); } catch {} }
 
-    // 🆕 1: 双向记忆支持群聊
     function applyBidirectionalInjection() {
         const c = getCtx(); if (!c || typeof c.setExtensionPrompt !== 'function') return;
         const id = getStorageId(), checked = window.__pmBidirectional[id] || [], histories = window.__pmHistories[id] || {};
@@ -263,7 +261,6 @@
         const blocks = checked.map(name => {
             const conv = (histories[name] || []).slice(-BIDIRECTIONAL_LIMIT);
             if (!conv.length) return '';
-            // 群聊
             if (name.startsWith('__group_')) {
                 const meta = groups[name]; if (!meta) return '';
                 const lines = conv.map(m => {
@@ -272,7 +269,6 @@
                 }).join('\n');
                 return `【群聊"${meta.name}"（成员：${meta.members.join('、')}）的最近聊天 — 仅参与者与用户知晓，其他角色不应知情】\n${lines}`;
             }
-            // 单聊
             const lines = conv.map(m => { const t = (m.content || '').replace(/\s*\/\s*/g, '。'); return m.role === 'user' ? `用户：${t}` : `${name}：${t}`; }).join('\n');
             return `【与 ${name} 的短信 — 仅 ${name} 与用户知晓】\n${lines}`;
         }).filter(Boolean).join('\n\n');
@@ -326,25 +322,38 @@
         handle.addEventListener('touchstart', onStart, { passive: false }); window.addEventListener('touchmove', onMove, { passive: false }); window.addEventListener('touchend', onEnd);
     }
 
-    function escapeHtml(s) { return (s || '').replace(/</g, '<').replace(/>/g, '>'); }
-    function escapeAttr(s) { return (s || '').replace(/"/g, '"').replace(/</g, '<'); }
+    function escapeHtml(s) { return (s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    function escapeAttr(s) { return (s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 
-    // 🆕 9: 收款卡片渲染
+    // 🔧 颜色查找兜底 - 大小写不敏感 + 索引匹配
+    function resolveGroupColor(name) {
+        if (!name) return null;
+        if (groupColorMap[name]) return groupColorMap[name];
+        const lower = name.toLowerCase();
+        for (const [k, v] of Object.entries(groupColorMap)) {
+            if (k.toLowerCase() === lower) return v;
+        }
+        const idx = groupMembers.findIndex(n => n.toLowerCase() === lower);
+        if (idx >= 0) return GROUP_COLORS[idx % GROUP_COLORS.length];
+        return null;
+    }
+
     function createBubbles(text, side, senderName) {
         const results = [];
         const re = new RegExp(SPECIAL_RE.source, 'gi');
         let last = 0, m;
+        const gc = senderName && side === 'left' ? resolveGroupColor(senderName) : null;
         const pushPlain = (str) => {
             const plain = str.trim(); if (!plain) return;
             if (senderName && side === 'left') {
                 const wrapper = document.createElement('div'); wrapper.className = 'pm-group-bubble-wrap';
                 const nameTag = document.createElement('div'); nameTag.className = 'pm-group-name'; nameTag.textContent = senderName;
-                if (groupColorMap[senderName]) nameTag.style.color = groupColorMap[senderName].bg;
+                if (gc) nameTag.style.color = gc.bg;
                 wrapper.appendChild(nameTag);
                 const inner = document.createElement('div'); inner.className = `pm-bubble pm-${side}`;
-                if (groupColorMap[senderName]) {
-                    inner.style.setProperty('background', groupColorMap[senderName].bg, 'important');
-                    inner.style.setProperty('color', groupColorMap[senderName].text, 'important');
+                if (gc) {
+                    inner.style.setProperty('background', gc.bg, 'important');
+                    inner.style.setProperty('color', gc.text, 'important');
                 }
                 inner.innerHTML = escapeHtml(plain).replace(/\n/g, '<br>');
                 wrapper.appendChild(inner); results.push(wrapper); return;
@@ -361,7 +370,7 @@
             if (isGroupLeft) {
                 container = document.createElement('div'); container.className = 'pm-group-bubble-wrap';
                 const nameTag = document.createElement('div'); nameTag.className = 'pm-group-name'; nameTag.textContent = senderName;
-                if (groupColorMap[senderName]) nameTag.style.color = groupColorMap[senderName].bg;
+                if (gc) nameTag.style.color = gc.bg;
                 container.appendChild(nameTag);
             }
             const b = document.createElement('div'); b.className = `pm-bubble pm-${side} pm-special`;
@@ -378,8 +387,7 @@
                 const dur = Math.min(VOICE_MAX_SEC, Math.max(1, len * 2));
                 const width = Math.min(240, Math.max(110, 90 + len * 5));
                 let voiceStyle = `width:${width}px`, voiceClass = `pm-voice-card pm-voice-${side}`;
-                if (isGroupLeft && groupColorMap[senderName]) {
-                    const gc = groupColorMap[senderName];
+                if (isGroupLeft && gc) {
                     voiceStyle = `width:${width}px;background:${gc.bg} !important;color:${gc.text} !important;`;
                     voiceClass = 'pm-voice-card pm-voice-left pm-voice-group';
                 }
@@ -414,29 +422,39 @@
         return (str || '').split(/\s*\/\s*/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 8);
     }
 
-    // 🔧 4: 群聊解析增强 - 每个 sentence 再次去除可能残留的角色名前缀
+    // 🔧 超强群聊解析 - 多层剥离装饰符号
     function parseGroupResponse(raw) {
         const cleaned = cleanResponse(raw);
-        const lines = cleaned.split('\n').filter(l => l.trim());
+        const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
         const result = [];
-        const memberSet = new Set(groupMembers.map(n => n.toLowerCase()));
 
-        const stripSpeakerPrefix = (s) => {
-            // 去掉 "(角色名：xxx)" 或 "角色名：xxx" 这种残留
-            let cleaned = s.trim();
-            const m1 = cleaned.match(/^[\(（]?\s*(.{1,15})\s*[：:]\s*(.+?)\s*[\)）]?$/);
-            if (m1 && memberSet.has(m1[1].trim().toLowerCase())) return m1[2].trim().replace(/[\)）]+$/, '');
-            return cleaned;
+        const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
+        const memberMap = new Map();
+        groupMembers.forEach(n => memberMap.set(normName(n), n));
+
+        const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
+
+        const stripAllPrefix = (s) => {
+            let t = (s || '').trim();
+            for (let i = 0; i < 3; i++) {
+                const m = t.match(speakerRe);
+                if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
+                else break;
+            }
+            const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
+            if (outer && memberMap.has(normName(outer[1]))) t = outer[2].trim();
+            t = t.replace(/[\)）]+\s*$/, '').trim();
+            return t;
         };
 
         for (const line of lines) {
-            const m = line.match(/^[\(（]?\s*(.{1,20})\s*[：:]\s*(.+)$/);
-            if (m && memberSet.has(m[1].trim().toLowerCase())) {
-                const name = groupMembers.find(n => n.toLowerCase() === m[1].trim().toLowerCase()) || m[1].trim();
-                const sentences = m[2].split(/\s*\/\s*/).map(s => stripSpeakerPrefix(s)).filter(Boolean).slice(0, 8);
+            const m = line.match(speakerRe);
+            if (m && memberMap.has(normName(m[1]))) {
+                const name = memberMap.get(normName(m[1]));
+                const sentences = m[2].split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
                 if (sentences.length) result.push({ name, sentences });
             } else {
-                const sentences = line.split(/\s*\/\s*/).map(s => stripSpeakerPrefix(s)).filter(Boolean).slice(0, 8);
+                const sentences = line.split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
                 if (sentences.length) {
                     if (result.length > 0) result[result.length - 1].sentences.push(...sentences);
                     else result.push({ name: groupMembers[0] || '???', sentences });
@@ -445,6 +463,7 @@
         }
         return result;
     }
+
     async function fetchSMS(userMsg) {
         const c = getCtx();
         conversationHistory.push({ role: 'user', content: userMsg });
@@ -461,7 +480,6 @@
         if (isGroupChat) {
             const memberList = groupMembers.join('、');
             const groupName = groupDisplayName || `群聊：${memberList}`;
-            // 🔧 4: 强化群聊格式约束
             const groupRules = `
 [群聊短信模式——最高优先级]
 群聊名称：${groupName}
@@ -710,13 +728,11 @@
         return ov;
     }
 
-    // 🆕 5: 群聊创建/编辑弹窗 — 关闭后回到联系人列表
     function showGroupForm(mode, existingName, existingMembers) {
         document.getElementById('pm-overlay')?.remove();
         const title = mode === 'create' ? '新建群聊' : '编辑群聊';
         const initName = existingName || '';
         const initMembers = (existingMembers || []).join(' / ');
-        // mode==='edit' 时关闭按钮不返回联系人列表，回到聊天界面
         const closeAction = mode === 'create' ? "window.__pmShowList()" : "document.getElementById('pm-overlay').remove()";
         makeOverlay(`
 <div class="pm-modal">
@@ -779,8 +795,6 @@
             saveGroupMeta();
             groupMembers = names; groupDisplayName = groupName;
             groupColorMap = {}; names.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
-            phoneWindow.querySelector('.pm-name').textContent = groupName;
-            fitNameFont();
             window.__pmSwitch(currentGroupKey);
         }
     };
@@ -789,7 +803,7 @@
         if (!isGroupChat) return;
         showGroupForm('edit', groupDisplayName, groupMembers);
     };
-    // ── 设置弹窗 ──
+
     window.__pmShowConfig = () => {
         loadProfiles(); loadTheme(); loadBgSettings();
         const cfg = window.__pmConfig, t = window.__pmTheme;
@@ -808,7 +822,6 @@
         const id = getStorageId(), localKey = `${id}_${currentPersona}`;
         const hasGlobalBg = !!window.__pmBgGlobal, hasLocalBg = !!window.__pmBgLocal[localKey];
 
-        // 🔧 7: 选择图片后右侧不要预览方框
         const globalBgBtn = hasGlobalBg
             ? `<button class="pm-bg-btn pm-bg-del" onclick="window.__pmClearBg('global')">清除</button>`
             : `<label class="pm-bg-btn">选择图片<input type="file" accept="image/*" onchange="window.__pmUploadBg(this,'global')" hidden></label>
@@ -886,7 +899,7 @@
           </div>
         </div>
       </div>
-      <div style="height:24px;"></div>
+      <div style="height:12px;"></div>
     </div>
   </div>
   <div class="pm-modal-add" id="pm-config-bottom" style="display:flex;flex-direction:column;gap:6px;">
@@ -1007,7 +1020,6 @@
         addNote(`已保存：${window.__pmConfig.useIndependent && apiUrl ? '独立API' : '主API'}`);
     };
 
-    // 🔧 1: 联系人列表 — 群聊也加勾选框，删除 👥 图标
     window.__pmShowList = () => {
         const id = getStorageId();
         loadGroupMeta();
@@ -1053,7 +1065,6 @@
 </div>`);
     };
 
-    // 🆕 5: 添加联系人弹窗 — 关闭后回到联系人页
     window.__pmShowAddContact = () => {
         document.getElementById('pm-overlay')?.remove();
         makeOverlay(`
@@ -1080,7 +1091,6 @@
         const id = getStorageId();
         if (window.__pmGroupMeta[id]) delete window.__pmGroupMeta[id][key];
         if (window.__pmHistories[id]) delete window.__pmHistories[id][key];
-        // 同步从双向勾选里移除
         const arr = window.__pmBidirectional[id] || [], idx = arr.indexOf(key);
         if (idx >= 0) { arr.splice(idx, 1); window.__pmBidirectional[id] = arr; saveBidirectional(); }
         saveGroupMeta();
@@ -1116,11 +1126,14 @@
             const nameEl = phoneWindow.querySelector('.pm-name');
             const editBtn = phoneWindow.querySelector('.pm-name-edit');
             if (isGroupChat) {
-                nameEl.textContent = groupDisplayName || name;
-                if (editBtn) editBtn.style.display = 'inline-flex';
+                // 🔧 超过5字截断
+                const display = groupDisplayName || name;
+                const arr = [...display];
+                nameEl.textContent = arr.length > 5 ? arr.slice(0, 5).join('') + '...' : display;
+                if (editBtn) editBtn.classList.remove('is-hidden');
             } else {
                 nameEl.textContent = name;
-                if (editBtn) editBtn.style.display = 'none';
+                if (editBtn) editBtn.classList.add('is-hidden');
             }
             fitNameFont();
             const list = phoneWindow.querySelector('.pm-msg-list'); list.innerHTML = '';
@@ -1197,7 +1210,6 @@
         phoneWindow.dataset.layout = window.__pmTheme.layout || 'standard';
         if (POPOVER_SUPPORTED) phoneWindow.setAttribute('popover', 'manual');
 
-        // 🔧 3: 铅笔图标改为更精致的 SVG（Feather icons 风格）
         const editSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
 
         phoneWindow.innerHTML = `
@@ -1207,7 +1219,7 @@
     <button onclick="window.__pmShowList()" class="pm-nav-btn pm-nav-left-btn">☰</button>
     <div class="pm-name-wrap">
       <div class="pm-name">${escapeHtml(defaultChar)}</div>
-      <button onclick="window.__pmEditGroup()" class="pm-name-edit" style="display:none;" title="编辑群聊">${editSvg}</button>
+      <button onclick="window.__pmEditGroup()" class="pm-name-edit is-hidden" title="编辑群聊">${editSvg}</button>
     </div>
     <div class="pm-nav-right">
       <button onclick="window.__pmToggleSelect()" class="pm-nav-btn pm-trash-btn">🗑</button>
@@ -1236,7 +1248,6 @@
         applyBidirectionalInjection(); ensureVisibility();
     };
 
-    // ══════════════════════ CSS ══════════════════════
     if (!document.getElementById('pm-css')) {
         const s = document.createElement('style'); s.id = 'pm-css';
         s.textContent = `
@@ -1260,10 +1271,11 @@
 .pm-navbar{position:relative;display:flex !important;align-items:center;padding:6px 10px;border-bottom:1px solid #f0f0f0;flex-shrink:0;min-height:38px;}
 .pm-nav-left-btn{margin-right:auto;}
 .pm-nav-right{display:flex;gap:4px;justify-content:flex-end;margin-left:auto;}
-.pm-name-wrap{position:absolute !important;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:6px;max-width:55%;pointer-events:auto;}
+/* 🔧 标题绝对居中 + 铅笔挂外侧不影响居中 */
+.pm-name-wrap{position:absolute !important;left:50%;top:50%;transform:translate(-50%,-50%);display:inline-flex;align-items:center;max-width:60%;pointer-events:auto;}
 .pm-name{font-weight:700 !important;color:#000 !important;font-size:15px !important;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
-/* 🔧 3: 铅笔图标更精致 */
-.pm-name-edit{background:#f0f0f3 !important;border:none !important;color:#666 !important;cursor:pointer;padding:5px !important;line-height:1;flex-shrink:0;border-radius:50% !important;width:24px;height:24px;display:inline-flex !important;align-items:center;justify-content:center;transition:all .2s;}
+.pm-name-edit{background:#f0f0f3 !important;border:none !important;color:#666 !important;cursor:pointer;padding:5px !important;line-height:1;flex-shrink:0;border-radius:50% !important;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;transition:all .2s;position:absolute;left:100%;margin-left:8px;}
+.pm-name-edit.is-hidden{display:none !important;}
 .pm-name-edit:hover{background:#007aff !important;color:#fff !important;transform:scale(1.05);}
 .pm-name-edit svg{display:block;}
 #pm-iphone[data-layout="relaxed"] .pm-nav-right{gap:10px;}
@@ -1294,14 +1306,12 @@
 @keyframes pm-bounce{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-5px)}}
 .pm-note{text-align:center;font-size:11px;color:#bbb;padding:3px 0;}
 .pm-transfer-card{background:linear-gradient(135deg,#ff9500,#ff6b00);color:#fff;border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:10px;min-width:150px;box-shadow:0 3px 10px rgba(255,149,0,.35);}
-/* 🆕 9: 收款卡片 - 绿色渐变 */
 .pm-receive-card{background:linear-gradient(135deg,#34c759,#28a745);color:#fff;border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:10px;min-width:150px;box-shadow:0 3px 10px rgba(52,199,89,.35);}
 .pm-t-icon{width:34px;height:34px;background:rgba(255,255,255,.25);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;}
 .pm-t-info{display:flex;flex-direction:column;gap:1px;}.pm-t-info b{font-size:12px;opacity:.85;}.pm-t-info span{font-size:17px;font-weight:700;}
 .pm-img-card{background:#f2f2f7;border:1px solid #e0e0e0;padding:12px 14px;border-radius:14px;color:#555;font-size:13px;text-align:center;}
 .pm-voice-wrap{display:flex;flex-direction:column;gap:4px;align-items:inherit;}
 .pm-special.pm-right .pm-voice-wrap{align-items:flex-end;}.pm-special.pm-left .pm-voice-wrap{align-items:flex-start;}
-/* 🔧 2: 语音条强制单行布局 */
 .pm-voice-card{display:flex !important;align-items:center !important;flex-direction:row !important;flex-wrap:nowrap !important;gap:10px;padding:10px 14px;border-radius:18px;cursor:pointer;user-select:none;transition:filter .15s;white-space:nowrap;}
 .pm-voice-card:hover{filter:brightness(.96);}
 .pm-voice-right{background:var(--pm-r-bg);color:var(--pm-r-txt);border-bottom-right-radius:4px;flex-direction:row-reverse !important;}
@@ -1367,7 +1377,6 @@
 .pm-layout-row{display:flex;gap:6px;}
 .pm-layout-chip{padding:6px 16px;border-radius:16px;font-size:12px;color:#555;background:#f5f5f5;cursor:pointer;border:2px solid transparent;transition:all .15s;user-select:none;}
 .pm-layout-chip:hover{background:#eee;}.pm-layout-active{border-color:#007aff;color:#007aff;background:#f0f7ff;}
-/* 🔧 6: 背景图行更舒展 */
 .pm-bg-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .pm-bg-label{font-size:12px;color:#555;font-weight:500;min-width:64px;}
 .pm-bg-btn{background:#f0f0f3;border:1px solid #ddd;border-radius:8px;padding:6px 12px;font-size:12px;color:#555;cursor:pointer;white-space:nowrap;font-family:inherit;}
@@ -1386,7 +1395,6 @@
 .pm-crop-frame img{position:absolute;left:0;top:0;max-width:none;pointer-events:none;}
 .pm-crop-mask{position:absolute;inset:0;border:2px solid rgba(255,255,255,0.6);box-shadow:0 0 0 2000px rgba(0,0,0,0.3) inset;pointer-events:none;border-radius:8px;}
 .pm-crop-zoom{display:flex;align-items:center;gap:8px;margin-top:10px;}
-/* 🔧 8: 缩放滑块鼠标保持 pointer */
 .pm-crop-zoom input[type=range]{accent-color:#007aff;cursor:pointer !important;flex:1;}
 .pm-crop-zoom input[type=range]::-webkit-slider-thumb{cursor:pointer !important;}
 .pm-crop-zoom input[type=range]::-moz-range-thumb{cursor:pointer !important;}
@@ -1427,5 +1435,5 @@
     loadBidirectional(); loadGroupMeta();
     setTimeout(() => { migrateOldHistory(); applyBidirectionalInjection(); }, 1500);
 
-    console.log('[phone-mode] v7.0');
+    console.log('[phone-mode] v7.1');
 })();
