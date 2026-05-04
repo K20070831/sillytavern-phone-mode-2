@@ -2,425 +2,829 @@
     await new Promise(r => setTimeout(r, 1000));
 
     const SAVE_LIMIT = 60, CONTEXT_LIMIT = 20, BIDIRECTIONAL_LIMIT = 20, MAX_BIDIRECTIONAL = 5;
-    const BIDIRECTIONAL_KEY = 'PHONE_SMS_MEMORY', VOICE_MAX_SEC = 60, MODEL_VISIBLE_ROWS = 4;
-    const MAX_GROUP_MEMBERS = 6;
+    const BIDIRECTIONAL_KEY = 'PHONE_SMS_MEMORY', VOICE_MAX_SEC = 60, MODEL_VISIBLE_ROWS = 4, MAX_GROUP_MEMBERS = 6;
     const POPOVER_SUPPORTED = typeof HTMLElement !== 'undefined' && HTMLElement.prototype.hasOwnProperty('popover');
     const GROUP_COLORS = [
-        { bg:'#e9e9eb', text:'#000' }, { bg:'#b8e6c8', text:'#1b4332' },
-        { bg:'#f5d0d0', text:'#4a2030' }, { bg:'#d4d0f5', text:'#2d2252' },
-        { bg:'#f5e6b8', text:'#4a3a10' },
+        { bg: '#e9e9eb', text: '#000' }, { bg: '#b8e6c8', text: '#1b4332' },
+        { bg: '#f5d0d0', text: '#4a2030' }, { bg: '#d4d0f5', text: '#2d2252' },
+        { bg: '#f5e6b8', text: '#4a3a10' },
     ];
 
     window.__pmHistories = window.__pmHistories || {};
-    window.__pmConfig = window.__pmConfig || { apiUrl:'',apiKey:'',model:'',useIndependent:false };
+    window.__pmConfig = window.__pmConfig || { apiUrl: '', apiKey: '', model: '', useIndependent: false };
     window.__pmProfiles = window.__pmProfiles || [];
     window.__pmBidirectional = window.__pmBidirectional || {};
-    window.__pmTheme = window.__pmTheme || { preset:'default',customRight:'',customLeft:'',borderColor:'',layout:'standard' };
+    window.__pmTheme = window.__pmTheme || { preset: 'default', customRight: '', customLeft: '', borderColor: '', layout: 'standard' };
     window.__pmBgGlobal = window.__pmBgGlobal || '';
     window.__pmBgLocal = window.__pmBgLocal || {};
-    window.__pmGroups = window.__pmGroups || {}; // {storageId: {displayName: {name, members}}}
+    window.__pmGroupMeta = window.__pmGroupMeta || {}; // {storageId: {groupKey: {name, members}}}
     let __pmModelList = [];
 
-    let phoneActive=false, phoneWindow=null, currentPersona='', conversationHistory=[];
-    let isGenerating=false, isMinimized=false, isSelectMode=false;
-    let isGroupChat=false, groupMembers=[], groupColorMap={}, groupDisplayName='';
+    let phoneActive = false, phoneWindow = null, currentPersona = '', conversationHistory = [];
+    let isGenerating = false, isMinimized = false, isSelectMode = false;
+    let isGroupChat = false, groupMembers = [], groupColorMap = {}, groupDisplayName = '';
+    let currentGroupKey = ''; // 用于识别群聊元数据
 
-    const getCtx = () => typeof SillyTavern!=='undefined' ? SillyTavern.getContext() : null;
+    const getCtx = () => typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
 
     const THEME_PRESETS = {
-        default:{right:'#007aff',left:'#e9e9eb',rightText:'#fff',leftText:'#000',label:'默认蓝'},
-        pink:{right:'#ff6b8a',left:'#fce4ec',rightText:'#fff',leftText:'#4a2030',label:'樱花粉'},
-        dark:{right:'#5856d6',left:'#2c2c2e',rightText:'#fff',leftText:'#e0e0e0',label:'暗夜紫'},
-        frost:{right:'rgba(0,122,255,0.55)',left:'rgba(255,255,255,0.35)',rightText:'#fff',leftText:'#222',label:'磨砂玻璃',frost:true},
-        mint:{right:'#34c759',left:'#e8f5e9',rightText:'#fff',leftText:'#1b4332',label:'薄荷绿'},
+        default: { right: '#007aff', left: '#e9e9eb', rightText: '#fff', leftText: '#000', label: '默认蓝' },
+        pink:    { right: '#ff6b8a', left: '#fce4ec', rightText: '#fff', leftText: '#4a2030', label: '樱花粉' },
+        dark:    { right: '#5856d6', left: '#2c2c2e', rightText: '#fff', leftText: '#e0e0e0', label: '暗夜紫' },
+        frost:   { right: 'rgba(0,122,255,0.55)', left: 'rgba(255,255,255,0.35)', rightText: '#fff', leftText: '#222', label: '磨砂玻璃', frost: true },
+        mint:    { right: '#34c759', left: '#e8f5e9', rightText: '#fff', leftText: '#1b4332', label: '薄荷绿' },
     };
 
-    function contrastText(bg){if(!bg||bg.startsWith('rgba'))return'#fff';const c=bg.replace('#','');if(c.length!==6)return'#000';const r=parseInt(c.substr(0,2),16),g=parseInt(c.substr(2,2),16),b=parseInt(c.substr(4,2),16);return(r*.299+g*.587+b*.114)>150?'#000':'#fff';}
-    function loadTheme(){try{window.__pmTheme={...window.__pmTheme,...JSON.parse(localStorage.getItem('ST_SMS_THEME'))};}catch{}}
-    function saveTheme(){try{localStorage.setItem('ST_SMS_THEME',JSON.stringify(window.__pmTheme));}catch{}}
-    function loadBgSettings(){try{window.__pmBgGlobal=localStorage.getItem('ST_SMS_BG_GLOBAL')||'';}catch{}try{window.__pmBgLocal=JSON.parse(localStorage.getItem('ST_SMS_BG_LOCAL'))||{};}catch{}}
-    function saveBgGlobal(){try{localStorage.setItem('ST_SMS_BG_GLOBAL',window.__pmBgGlobal);}catch{}}
-    function saveBgLocal(){try{localStorage.setItem('ST_SMS_BG_LOCAL',JSON.stringify(window.__pmBgLocal));}catch{}}
-    function loadGroups(){try{window.__pmGroups=JSON.parse(localStorage.getItem('ST_SMS_GROUPS'))||{};}catch{}}
-    function saveGroups(){try{localStorage.setItem('ST_SMS_GROUPS',JSON.stringify(window.__pmGroups));}catch{}}
-
-    function applyTheme(){
-        const el=phoneWindow;if(!el)return;const t=window.__pmTheme;
-        const p=THEME_PRESETS[t.preset]||THEME_PRESETS.default;
-        el.style.setProperty('--pm-r-bg',t.customRight||p.right);
-        el.style.setProperty('--pm-l-bg',t.customLeft||p.left);
-        el.style.setProperty('--pm-r-txt',t.customRight?contrastText(t.customRight):p.rightText);
-        el.style.setProperty('--pm-l-txt',t.customLeft?contrastText(t.customLeft):p.leftText);
-        el.style.setProperty('--pm-border',t.borderColor||'#1a1a1a');
-        el.style.setProperty('--pm-frost',p.frost?'1':'0');
-    }
-    function applyBackground(){
-        const ml=phoneWindow?.querySelector('.pm-msg-list');if(!ml)return;
-        const id=getStorageId(),lk=`${id}_${currentPersona}`;
-        const bg=window.__pmBgLocal[lk]||window.__pmBgGlobal||'';
-        if(bg){ml.style.setProperty('background-image',`url(${bg})`,'important');ml.style.setProperty('background-size','cover','important');ml.style.setProperty('background-position','center','important');}
-        else{ml.style.removeProperty('background-image');ml.style.removeProperty('background-size');ml.style.removeProperty('background-position');}
+    function contrastText(bg) {
+        if (!bg || bg.startsWith('rgba')) return '#fff';
+        const c = bg.replace('#', ''); if (c.length !== 6) return '#000';
+        const r = parseInt(c.substr(0,2),16), g = parseInt(c.substr(2,2),16), b = parseInt(c.substr(4,2),16);
+        return (r*0.299 + g*0.587 + b*0.114) > 150 ? '#000' : '#fff';
     }
 
-    // ── 图片裁剪对话框 ──
-    function showCropDialog(imgSrc) {
-        return new Promise((resolve) => {
-            const ov = document.createElement('div'); ov.className = 'pm-crop-overlay';
-            if (POPOVER_SUPPORTED) ov.setAttribute('popover','manual');
-            const cropW = Math.min(300, window.innerWidth - 40);
-            const cropH = Math.round(cropW * 1.4); // 接近手机消息区比例
-            let scale = 1, ox = 0, oy = 0, dragging = false, sx = 0, sy = 0, sox = 0, soy = 0;
-            ov.innerHTML = `
-<div class="pm-crop-dialog">
-  <div class="pm-crop-title">裁剪背景图</div>
-  <div class="pm-crop-container" style="width:${cropW}px;height:${cropH}px;">
-    <img class="pm-crop-img" src="${imgSrc}" draggable="false">
-    <div class="pm-crop-frame" style="width:${cropW}px;height:${cropH}px;"></div>
+    function loadTheme() { try { window.__pmTheme = { ...window.__pmTheme, ...JSON.parse(localStorage.getItem('ST_SMS_THEME')) }; } catch {} }
+    function saveTheme() { try { localStorage.setItem('ST_SMS_THEME', JSON.stringify(window.__pmTheme)); } catch {} }
+    function loadBgSettings() {
+        try { window.__pmBgGlobal = localStorage.getItem('ST_SMS_BG_GLOBAL') || ''; } catch {}
+        try { window.__pmBgLocal = JSON.parse(localStorage.getItem('ST_SMS_BG_LOCAL')) || {}; } catch {}
+    }
+    function saveBgGlobal() { try { localStorage.setItem('ST_SMS_BG_GLOBAL', window.__pmBgGlobal); } catch {} }
+    function saveBgLocal() { try { localStorage.setItem('ST_SMS_BG_LOCAL', JSON.stringify(window.__pmBgLocal)); } catch {} }
+    function loadGroupMeta() { try { window.__pmGroupMeta = JSON.parse(localStorage.getItem('ST_SMS_GROUP_META')) || {}; } catch { window.__pmGroupMeta = {}; } }
+    function saveGroupMeta() { try { localStorage.setItem('ST_SMS_GROUP_META', JSON.stringify(window.__pmGroupMeta)); } catch {} }
+
+    function applyTheme() {
+        const el = phoneWindow; if (!el) return;
+        const t = window.__pmTheme, p = THEME_PRESETS[t.preset] || THEME_PRESETS.default;
+        const rBg = t.customRight || p.right, lBg = t.customLeft || p.left;
+        const rTxt = t.customRight ? contrastText(t.customRight) : p.rightText;
+        const lTxt = t.customLeft ? contrastText(t.customLeft) : p.leftText;
+        const border = t.borderColor || '#1a1a1a';
+        el.style.setProperty('--pm-r-bg', rBg); el.style.setProperty('--pm-l-bg', lBg);
+        el.style.setProperty('--pm-r-txt', rTxt); el.style.setProperty('--pm-l-txt', lTxt);
+        el.style.setProperty('--pm-border', border);
+        el.style.setProperty('--pm-frost', p.frost ? '1' : '0');
+    }
+
+    function applyBackground() {
+        const msgList = phoneWindow?.querySelector('.pm-msg-list'); if (!msgList) return;
+        const id = getStorageId(), localKey = `${id}_${currentPersona}`;
+        const bg = window.__pmBgLocal[localKey] || window.__pmBgGlobal || '';
+        if (bg) {
+            msgList.style.setProperty('background-image', `url(${bg})`, 'important');
+            msgList.style.setProperty('background-size', 'cover', 'important');
+            msgList.style.setProperty('background-position', 'center', 'important');
+        } else {
+            msgList.style.removeProperty('background-image');
+            msgList.style.removeProperty('background-size');
+            msgList.style.removeProperty('background-position');
+        }
+    }
+
+    // ── 顶部标题自适应字号 ──
+    function fitNameFont() {
+        const nameEl = phoneWindow?.querySelector('.pm-name');
+        if (!nameEl) return;
+        nameEl.style.fontSize = '15px';
+        requestAnimationFrame(() => {
+            let fs = 15;
+            while (nameEl.scrollWidth > nameEl.clientWidth && fs > 9) {
+                fs -= 0.5; nameEl.style.fontSize = fs + 'px';
+            }
+        });
+    }
+
+    // ── 图片裁剪（按手机消息列表比例） ──
+    function openCropper(imgDataUrl, onConfirm) {
+        // 手机消息区可见比例：330(w) x (580-navbar-input-bar) ≈ 330x450，即约 0.73
+        const ratio = 330 / 450;
+        document.getElementById('pm-overlay')?.remove();
+        const ov = document.createElement('div'); ov.id = 'pm-overlay';
+        if (POPOVER_SUPPORTED) ov.setAttribute('popover', 'manual');
+        ov.innerHTML = `
+<div class="pm-modal pm-modal-wide">
+  <div class="pm-modal-header"><b>裁剪图片</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
+  <div style="padding:12px 14px;">
+    <div class="pm-crop-tip">拖动图片调整位置，滚轮/捏合缩放</div>
+    <div class="pm-crop-frame" id="pm-crop-frame">
+      <img id="pm-crop-img" src="${imgDataUrl}" alt="">
+      <div class="pm-crop-mask"></div>
+    </div>
+    <div class="pm-crop-zoom">
+      <span style="font-size:11px;color:#888;">缩放</span>
+      <input type="range" id="pm-crop-zoom" min="100" max="400" value="100" style="flex:1;">
+    </div>
   </div>
-  <div class="pm-crop-zoom">
-    <button class="pm-crop-btn" data-z="-1">➖</button>
-    <span class="pm-crop-scale">100%</span>
-    <button class="pm-crop-btn" data-z="1">➕</button>
-  </div>
-  <div class="pm-crop-actions">
-    <button class="pm-crop-cancel">取消</button>
-    <button class="pm-crop-confirm">确认裁剪</button>
+  <div class="pm-modal-add" style="display:flex;gap:8px;">
+    <button onclick="document.getElementById('pm-overlay').remove()" style="flex:1;background:#f0f0f0;color:#333;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;">取消</button>
+    <button id="pm-crop-confirm" style="flex:1;background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">确认裁剪</button>
   </div>
 </div>`;
-            document.body.appendChild(ov);
-            if (ov.showPopover) try { ov.showPopover(); } catch {}
+        ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+        document.body.appendChild(ov);
+        if (ov.showPopover) try { ov.showPopover(); } catch {}
 
-            const img = ov.querySelector('.pm-crop-img');
-            const container = ov.querySelector('.pm-crop-container');
-            const scaleLabel = ov.querySelector('.pm-crop-scale');
-            const updateImg = () => { img.style.transform = `translate(${ox}px,${oy}px) scale(${scale})`; scaleLabel.textContent = Math.round(scale*100)+'%'; };
+        const frame = ov.querySelector('#pm-crop-frame'); const img = ov.querySelector('#pm-crop-img');
+        const zoomSlider = ov.querySelector('#pm-crop-zoom');
+        let tx = 0, ty = 0, scale = 1;
+        let frameW = 0, frameH = 0, natW = 0, natH = 0, baseW = 0, baseH = 0;
 
-            // 等图片加载后居中
-            img.onload = () => {
-                const ratio = Math.max(cropW/img.naturalWidth, cropH/img.naturalHeight);
-                scale = ratio; ox = (cropW - img.naturalWidth*scale)/2; oy = (cropH - img.naturalHeight*scale)/2;
-                updateImg();
-            };
-            if (img.complete) img.onload();
-
-            // 拖动
-            const gc = (e) => e.touches ? {x:e.touches[0].clientX,y:e.touches[0].clientY} : {x:e.clientX,y:e.clientY};
-            const onDown = (e) => { dragging=true;const c=gc(e);sx=c.x;sy=c.y;sox=ox;soy=oy;if(e.cancelable)e.preventDefault(); };
-            const onMove = (e) => { if(!dragging)return;const c=gc(e);ox=sox+(c.x-sx);oy=soy+(c.y-sy);updateImg();if(e.cancelable)e.preventDefault(); };
-            const onUp = () => { dragging=false; };
-            container.addEventListener('mousedown',onDown);window.addEventListener('mousemove',onMove);window.addEventListener('mouseup',onUp);
-            container.addEventListener('touchstart',onDown,{passive:false});window.addEventListener('touchmove',onMove,{passive:false});window.addEventListener('touchend',onUp);
-
-            // 缩放
-            ov.querySelectorAll('.pm-crop-btn').forEach(btn => {
-                btn.onclick = () => {
-                    const d = parseInt(btn.dataset.z);
-                    const ns = Math.max(0.2, Math.min(5, scale + d*0.15));
-                    // 以裁剪框中心为锚点缩放
-                    const cx = cropW/2, cy = cropH/2;
-                    ox = cx - (cx-ox)*(ns/scale); oy = cy - (cy-oy)*(ns/scale);
-                    scale = ns; updateImg();
-                };
-            });
-
-            // 取消
-            ov.querySelector('.pm-crop-cancel').onclick = () => { ov.remove(); resolve(null); };
-
-            // 确认裁剪
-            ov.querySelector('.pm-crop-confirm').onclick = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = cropW * 2; canvas.height = cropH * 2; // 2x 清晰度
-                const ctx2d = canvas.getContext('2d');
-                ctx2d.scale(2,2);
-                ctx2d.drawImage(img, ox, oy, img.naturalWidth*scale, img.naturalHeight*scale);
-                let result = canvas.toDataURL('image/jpeg', 0.8);
-                // 二次压缩
-                if (result.length > 200*1370) {
-                    result = canvas.toDataURL('image/jpeg', 0.5);
-                }
-                ov.remove(); resolve(result);
-            };
-        });
-    }
-
-    const SPECIAL_KEYWORDS={'转账':'转账','transfer':'转账','Transfer':'转账','TRANSFER':'转账','图片':'图片','image':'图片','Image':'图片','IMAGE':'图片','img':'图片','pic':'图片','photo':'图片','语音':'语音','voice':'语音','Voice':'语音','VOICE':'语音','audio':'语音'};
-    const KW_PATTERN=Object.keys(SPECIAL_KEYWORDS).join('|');
-    const SPECIAL_RE=new RegExp(`[\\(（]\\s*(${KW_PATTERN})\\s*[+：:\\s]*([^)）]+)[\\)）]`,'gi');
-    function normalizeKeyword(k){return SPECIAL_KEYWORDS[k]||SPECIAL_KEYWORDS[k.toLowerCase()]||k;}
-
-    function getStorageId(){const c=getCtx();if(!c)return'sms_unknown__default';const ch=c.characters?.[c.characterId];const av=ch?.avatar||`idx_${c.characterId}`;const cf=c.chatId||(typeof c.getCurrentChatId==='function'?c.getCurrentChatId():null)||c.chat_metadata?.chat_id_hash||c.chat_file||'default';return`sms_${av}__${cf}`;}
-    function migrateOldHistory(){if(localStorage.getItem('ST_SMS_MIGRATED_V3'))return;const c=getCtx();if(!c)return;try{const od=window.__pmHistories||{},nd={};let mg=0;for(const k of Object.keys(od)){if(k.startsWith('sms_')){nd[k]=od[k];continue;}const m=k.match(/^(\d+)_(.+)$/);if(!m){nd[k]=od[k];continue;}const ch=c.characters?.[parseInt(m[1])];if(ch?.avatar){nd[`sms_${ch.avatar}__${m[2]}`]=od[k];mg++;}else nd[k]=od[k];}window.__pmHistories=nd;localStorage.setItem('ST_SMS_DATA_V2',JSON.stringify(nd));localStorage.setItem('ST_SMS_MIGRATED_V3','1');}catch{}}
-    function normalizeApiUrls(i){let u=(i||'').trim().replace(/\/+$/,'');if(!u)return{chatUrl:'',modelsUrl:''};if(/\/chat\/completions$/i.test(u))return{chatUrl:u,modelsUrl:u.replace(/\/chat\/completions$/i,'/models')};if(/\/models$/i.test(u))return{chatUrl:u.replace(/\/models$/i,'/chat/completions'),modelsUrl:u};if(/\/v\d+$/i.test(u))return{chatUrl:u+'/chat/completions',modelsUrl:u+'/models'};return{chatUrl:u+'/v1/chat/completions',modelsUrl:u+'/v1/models'};}
-    function loadProfiles(){try{window.__pmProfiles=JSON.parse(localStorage.getItem('ST_SMS_API_PROFILES'))||[];}catch{window.__pmProfiles=[];}}
-    function saveProfiles(){try{localStorage.setItem('ST_SMS_API_PROFILES',JSON.stringify(window.__pmProfiles));}catch{}}
-    function addOrUpdateProfile(p){if(!p.apiUrl||!p.apiKey)return;const i=window.__pmProfiles.findIndex(x=>x.apiUrl===p.apiUrl&&x.apiKey===p.apiKey);if(i>=0)window.__pmProfiles[i]={...window.__pmProfiles[i],...p,savedAt:Date.now()};else window.__pmProfiles.push({...p,savedAt:Date.now()});saveProfiles();}
-    window.__pmDeleteProfile=(i)=>{window.__pmProfiles.splice(i,1);saveProfiles();window.__pmShowConfig();};
-    window.__pmPickProfile=(i)=>{const p=window.__pmProfiles[i];if(!p)return;const u=document.getElementById('pm-cfg-url'),k=document.getElementById('pm-cfg-key'),m=document.getElementById('pm-cfg-model');if(u)u.value=p.apiUrl||'';if(k)k.value=p.apiKey||'';if(m)m.value=p.model||'';};
-    window.__pmSetMode=(v)=>{window.__pmConfig.useIndependent=!!v;try{localStorage.setItem('ST_SMS_CONFIG',JSON.stringify(window.__pmConfig));}catch{}const a=document.getElementById('pm-mode-main'),b=document.getElementById('pm-mode-indep'),t=document.getElementById('pm-mode-tip');if(a&&b){a.classList.toggle('pm-mode-active',!v);b.classList.toggle('pm-mode-active',!!v);}if(t)t.textContent=v?'🔌 独立API':'🏠 主API';};
-    function loadBidirectional(){try{window.__pmBidirectional=JSON.parse(localStorage.getItem('ST_SMS_BIDIRECTIONAL'))||{};}catch{window.__pmBidirectional={};}}
-    function saveBidirectional(){try{localStorage.setItem('ST_SMS_BIDIRECTIONAL',JSON.stringify(window.__pmBidirectional));}catch{}}
-    function applyBidirectionalInjection(){const c=getCtx();if(!c||typeof c.setExtensionPrompt!=='function')return;const id=getStorageId(),ck=window.__pmBidirectional[id]||[],hs=window.__pmHistories[id]||{};if(!ck.length){try{c.setExtensionPrompt(BIDIRECTIONAL_KEY,'',1,4);}catch{}return;}const bl=ck.map(n=>{const cv=(hs[n]||[]).slice(-BIDIRECTIONAL_LIMIT);if(!cv.length)return'';return`【与${n}的短信—仅${n}与用户知晓】\n`+cv.map(m=>{const t=(m.content||'').replace(/\s*\/\s*/g,'。');return m.role==='user'?`用户：${t}`:`${n}：${t}`;}).join('\n');}).filter(Boolean).join('\n\n');if(!bl){try{c.setExtensionPrompt(BIDIRECTIONAL_KEY,'',1,4);}catch{}return;}try{c.setExtensionPrompt(BIDIRECTIONAL_KEY,`[短信记忆—私密]\n${bl}\n[结束]`,1,4);}catch{}}
-    window.__pmToggleBidirectional=(n)=>{const id=getStorageId(),a=window.__pmBidirectional[id]||[],i=a.indexOf(n);if(i>=0)a.splice(i,1);else{if(a.length>=MAX_BIDIRECTIONAL)return;a.push(n);}window.__pmBidirectional[id]=a;saveBidirectional();applyBidirectionalInjection();window.__pmShowList();};
-
-    async function gatherContext(){const c=getCtx(),ch=c?.characters?.[c.characterId]||{};const cl=(s)=>(s||'').replace(/```[\s\S]*?```/g,'').replace(/<think>[\s\S]*?<\/think>/gi,'').replace(/<[^>]+>/g,'').trim();const mc=(c?.chat||[]).slice(-8).map(m=>({who:m.is_user?'用户':(m.name||'角色'),content:cl(m.mes||'')})).filter(m=>m.content);const mt=mc.map(m=>`${m.who}：${m.content}`).join('\n');let wb='';try{if(typeof c?.getWorldInfoPrompt==='function'){const wi=await c.getWorldInfoPrompt((c.chat||[]).map(m=>m.mes||'').slice(-10),4096,false);wb=wi?.worldInfoString||wi?.worldInfoBefore||'';if(!wb&&wi&&typeof wi==='object')wb=[wi.worldInfoBefore,wi.worldInfoAfter].filter(Boolean).join('\n');}}catch{}return{cardDesc:ch.description??'',cardPersonality:ch.personality??'',cardScenario:ch.scenario??'',cardFirstMes:ch.first_mes??'',cardMesExample:ch.mes_example??'',mainChatText:mt,worldBookText:wb};}
-
-    function bindIsland(el,handle){let isDrag=false,sx,sy,stx=0,sty=0,moved=false;const gc=(e)=>e.touches?{x:e.touches[0].clientX,y:e.touches[0].clientY}:{x:e.clientX,y:e.clientY};const getT=()=>{const m=(el.style.transform||'').match(/translate\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px/);return m?{x:parseFloat(m[1]),y:parseFloat(m[2])}:{x:0,y:0};};const onS=(e)=>{if(e.target.tagName==='BUTTON')return;isDrag=true;moved=false;const c=gc(e);sx=c.x;sy=c.y;const t=getT();stx=t.x;sty=t.y;el.style.transition='none';if(e.cancelable)e.preventDefault();};const onM=(e)=>{if(!isDrag)return;const c=gc(e),dx=c.x-sx,dy=c.y-sy;if(!moved&&Math.abs(dx)<5&&Math.abs(dy)<5)return;moved=true;if(e.cancelable)e.preventDefault();el.style.setProperty('transform',`translate(${stx+dx}px,${sty+dy}px)`,'important');};const onE=()=>{if(!isDrag)return;isDrag=false;el.style.transition='.35s cubic-bezier(.18,.89,.32,1.2)';if(!moved)window.__pmToggleMin();};handle.addEventListener('mousedown',onS);window.addEventListener('mousemove',onM);window.addEventListener('mouseup',onE);handle.addEventListener('touchstart',onS,{passive:false});window.addEventListener('touchmove',onM,{passive:false});window.addEventListener('touchend',onE);}
-
-    function escapeHtml(s){return(s||'').replace(/</g,'<').replace(/>/g,'>');}
-    function escapeAttr(s){return(s||'').replace(/"/g,'"').replace(/</g,'<');}
-
-    // 自适应名字字号
-    function fitName(){
-        const el=phoneWindow?.querySelector('.pm-name');if(!el)return;
-        el.style.fontSize='15px';
-        requestAnimationFrame(()=>{
-            let fs=15;
-            while(el.scrollWidth>el.clientWidth&&fs>9){fs--;el.style.fontSize=fs+'px';}
-        });
-    }
-
-    function createBubbles(text,side,senderName){
-        const results=[];const re=new RegExp(SPECIAL_RE.source,'gi');let last=0,m;
-        const isGrp=!!senderName&&side==='left';
-        const gcol=isGrp&&groupColorMap[senderName]?groupColorMap[senderName]:null;
-        const pushPlain=(str)=>{
-            const plain=str.trim();if(!plain)return;
-            if(isGrp){
-                const wrap=document.createElement('div');wrap.className='pm-group-bubble-wrap';
-                const tag=document.createElement('div');tag.className='pm-group-name';tag.textContent=senderName;
-                if(gcol)tag.style.color=gcol.bg;
-                wrap.appendChild(tag);
-                const b=document.createElement('div');b.className='pm-bubble pm-left';
-                if(gcol){b.style.setProperty('background',gcol.bg,'important');b.style.setProperty('color',gcol.text,'important');}
-                b.innerHTML=escapeHtml(plain).replace(/\n/g,'<br>');
-                wrap.appendChild(b);results.push(wrap);
-            }else{
-                const b=document.createElement('div');b.className=`pm-bubble pm-${side}`;
-                b.innerHTML=escapeHtml(plain).replace(/\n/g,'<br>');results.push(b);
+        img.onload = () => {
+            const cw = frame.clientWidth;
+            frameW = cw; frameH = cw / ratio;
+            frame.style.height = frameH + 'px';
+            natW = img.naturalWidth; natH = img.naturalHeight;
+            // 用 cover 策略计算基础尺寸
+            const imgRatio = natW / natH;
+            if (imgRatio > ratio) {
+                baseH = frameH; baseW = baseH * imgRatio;
+            } else {
+                baseW = frameW; baseH = baseW / imgRatio;
             }
+            updateTransform();
         };
-        while((m=re.exec(text))!==null){
-            if(m.index>last)pushPlain(text.slice(last,m.index));
-            const kind=normalizeKeyword(m[1]);
-            if(kind==='语音'){
-                const txt=m[2].trim(),len=[...txt].length;
-                const dur=Math.min(VOICE_MAX_SEC,Math.max(1,len*2));
-                const width=Math.min(240,Math.max(100,80+len*5));
-                if(isGrp){
-                    const wrap=document.createElement('div');wrap.className='pm-group-bubble-wrap';
-                    const tag=document.createElement('div');tag.className='pm-group-name';tag.textContent=senderName;
-                    if(gcol)tag.style.color=gcol.bg;
-                    wrap.appendChild(tag);
-                    const b=document.createElement('div');b.className='pm-bubble pm-left pm-special';
-                    // 🔧 群聊语音条用角色颜色而非CSS变量
-                    const vbg=gcol?gcol.bg:'var(--pm-l-bg)';const vtxt=gcol?gcol.text:'var(--pm-l-txt)';
-                    b.innerHTML=`<div class="pm-voice-wrap"><div class="pm-voice-card" style="width:${width}px;background:${vbg};color:${vtxt};border-bottom-left-radius:4px;border-radius:18px;" onclick="window.__pmToggleVoice(this)"><span class="pm-voice-icon">🎤</span><span class="pm-voice-wave"><i></i><i></i><i></i></span><span class="pm-voice-dur">${dur}"</span></div><div class="pm-voice-text" style="display:none;">${escapeHtml(txt)}</div></div>`;
-                    wrap.appendChild(b);results.push(wrap);
-                }else{
-                    const b=document.createElement('div');b.className=`pm-bubble pm-${side} pm-special`;
-                    b.innerHTML=`<div class="pm-voice-wrap"><div class="pm-voice-card pm-voice-${side}" style="width:${width}px" onclick="window.__pmToggleVoice(this)"><span class="pm-voice-icon">🎤</span><span class="pm-voice-wave"><i></i><i></i><i></i></span><span class="pm-voice-dur">${dur}"</span></div><div class="pm-voice-text" style="display:none;">${escapeHtml(txt)}</div></div>`;
-                    results.push(b);
-                }
-            }else{
-                const b=document.createElement('div');b.className=`pm-bubble pm-${side} pm-special`;
-                if(kind==='转账'){const amt=parseFloat(m[2])||0;b.innerHTML=`<div class="pm-transfer-card"><div class="pm-t-icon">¥</div><div class="pm-t-info"><b>转账</b><span>¥${amt.toFixed(2)}</span></div></div>`;}
-                else{b.innerHTML=`<div class="pm-img-card">🖼️ ${escapeHtml(m[2].trim())}</div>`;}
-                results.push(b);
-            }
-            last=m.index+m[0].length;
+
+        function updateTransform() {
+            const w = baseW * scale, h = baseH * scale;
+            // 边界约束
+            const minX = frameW - w, minY = frameH - h;
+            tx = Math.max(minX, Math.min(0, tx)); ty = Math.max(minY, Math.min(0, ty));
+            img.style.width = w + 'px'; img.style.height = h + 'px';
+            img.style.transform = `translate(${tx}px, ${ty}px)`;
         }
-        if(last<text.length)pushPlain(text.slice(last));
-        if(!results.length)pushPlain(text);
+
+        zoomSlider.oninput = () => { scale = parseInt(zoomSlider.value) / 100; updateTransform(); };
+
+        // 拖拽
+        let dragging = false, sx = 0, sy = 0, stx = 0, sty = 0;
+        const onDragStart = (e) => {
+            dragging = true;
+            const c = e.touches ? e.touches[0] : e;
+            sx = c.clientX; sy = c.clientY; stx = tx; sty = ty;
+            if (e.cancelable) e.preventDefault();
+        };
+        const onDragMove = (e) => {
+            if (!dragging) return;
+            const c = e.touches ? e.touches[0] : e;
+            tx = stx + (c.clientX - sx); ty = sty + (c.clientY - sy);
+            updateTransform(); if (e.cancelable) e.preventDefault();
+        };
+        const onDragEnd = () => { dragging = false; };
+        frame.addEventListener('mousedown', onDragStart);
+        window.addEventListener('mousemove', onDragMove);
+        window.addEventListener('mouseup', onDragEnd);
+        frame.addEventListener('touchstart', onDragStart, { passive: false });
+        window.addEventListener('touchmove', onDragMove, { passive: false });
+        window.addEventListener('touchend', onDragEnd);
+        // 捏合缩放
+        let pinchDist = 0, pinchScale = 1;
+        frame.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                pinchScale = scale;
+            }
+        }, { passive: false });
+        frame.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+                const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                scale = Math.max(1, Math.min(4, pinchScale * d / pinchDist));
+                zoomSlider.value = Math.round(scale * 100);
+                updateTransform(); e.preventDefault();
+            }
+        }, { passive: false });
+        // 滚轮
+        frame.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            scale = Math.max(1, Math.min(4, scale + (e.deltaY > 0 ? -0.1 : 0.1)));
+            zoomSlider.value = Math.round(scale * 100);
+            updateTransform();
+        });
+
+        ov.querySelector('#pm-crop-confirm').onclick = () => {
+            // 导出：按裁剪框大小生成
+            const canvas = document.createElement('canvas');
+            const outW = 600, outH = Math.round(outW / ratio);
+            canvas.width = outW; canvas.height = outH;
+            const ctx = canvas.getContext('2d');
+            // 源图起点：-tx, -ty 对应裁剪框原点；源尺寸 scale * baseW -> frameW 的映射
+            const srcScale = natW / (baseW * scale); // src像素/显示像素
+            const sx = (-tx) * srcScale;
+            const sy = (-ty) * srcScale;
+            const sw = frameW * srcScale;
+            const sh = frameH * srcScale;
+            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH);
+            // 压缩到 ~200KB
+            let q = 0.7, out = canvas.toDataURL('image/jpeg', q);
+            while (out.length > 200 * 1370 && q > 0.2) { q -= 0.1; out = canvas.toDataURL('image/jpeg', q); }
+            ov.remove();
+            onConfirm(out);
+        };
+    }
+
+    const SPECIAL_KEYWORDS = {
+        '转账':'转账','transfer':'转账','Transfer':'转账','TRANSFER':'转账',
+        '图片':'图片','image':'图片','Image':'图片','IMAGE':'图片','img':'图片','pic':'图片','photo':'图片',
+        '语音':'语音','voice':'语音','Voice':'语音','VOICE':'语音','audio':'语音',
+    };
+    const KW_PATTERN = Object.keys(SPECIAL_KEYWORDS).join('|');
+    const SPECIAL_RE = new RegExp(`[\\(（]\\s*(${KW_PATTERN})\\s*[+：:\\s]*([^)）]+)[\\)）]`, 'gi');
+    function normalizeKeyword(k) { return SPECIAL_KEYWORDS[k] || SPECIAL_KEYWORDS[k.toLowerCase()] || k; }
+
+    function getStorageId() {
+        const c = getCtx(); if (!c) return 'sms_unknown__default';
+        const char = c.characters?.[c.characterId];
+        const avatar = char?.avatar || `idx_${c.characterId}`;
+        const chatFile = c.chatId || (typeof c.getCurrentChatId === 'function' ? c.getCurrentChatId() : null) || c.chat_metadata?.chat_id_hash || c.chat_file || 'default';
+        return `sms_${avatar}__${chatFile}`;
+    }
+
+    function migrateOldHistory() {
+        if (localStorage.getItem('ST_SMS_MIGRATED_V3')) return;
+        const c = getCtx(); if (!c) return;
+        try {
+            const oldData = window.__pmHistories || {}, newData = {}; let migrated = 0;
+            for (const oldKey of Object.keys(oldData)) {
+                if (oldKey.startsWith('sms_')) { newData[oldKey] = oldData[oldKey]; continue; }
+                const m = oldKey.match(/^(\d+)_(.+)$/);
+                if (!m) { newData[oldKey] = oldData[oldKey]; continue; }
+                const ch = c.characters?.[parseInt(m[1])];
+                if (ch?.avatar) { newData[`sms_${ch.avatar}__${m[2]}`] = oldData[oldKey]; migrated++; }
+                else newData[oldKey] = oldData[oldKey];
+            }
+            window.__pmHistories = newData;
+            localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(newData));
+            localStorage.setItem('ST_SMS_MIGRATED_V3', '1');
+        } catch {}
+    }
+
+    function normalizeApiUrls(input) {
+        let url = (input || '').trim().replace(/\/+$/, '');
+        if (!url) return { chatUrl: '', modelsUrl: '' };
+        if (/\/chat\/completions$/i.test(url)) return { chatUrl: url, modelsUrl: url.replace(/\/chat\/completions$/i, '/models') };
+        if (/\/models$/i.test(url)) return { chatUrl: url.replace(/\/models$/i, '/chat/completions'), modelsUrl: url };
+        if (/\/v\d+$/i.test(url)) return { chatUrl: url + '/chat/completions', modelsUrl: url + '/models' };
+        return { chatUrl: url + '/v1/chat/completions', modelsUrl: url + '/v1/models' };
+    }
+
+    function loadProfiles() { try { window.__pmProfiles = JSON.parse(localStorage.getItem('ST_SMS_API_PROFILES')) || []; } catch { window.__pmProfiles = []; } }
+    function saveProfiles() { try { localStorage.setItem('ST_SMS_API_PROFILES', JSON.stringify(window.__pmProfiles)); } catch {} }
+    function addOrUpdateProfile(p) {
+        if (!p.apiUrl || !p.apiKey) return;
+        const idx = window.__pmProfiles.findIndex(x => x.apiUrl === p.apiUrl && x.apiKey === p.apiKey);
+        if (idx >= 0) window.__pmProfiles[idx] = { ...window.__pmProfiles[idx], ...p, savedAt: Date.now() };
+        else window.__pmProfiles.push({ ...p, savedAt: Date.now() });
+        saveProfiles();
+    }
+    window.__pmDeleteProfile = (idx) => { window.__pmProfiles.splice(idx, 1); saveProfiles(); window.__pmShowConfig(); };
+    window.__pmPickProfile = (idx) => {
+        const p = window.__pmProfiles[idx]; if (!p) return;
+        const u = document.getElementById('pm-cfg-url'), k = document.getElementById('pm-cfg-key'), m = document.getElementById('pm-cfg-model');
+        if (u) u.value = p.apiUrl || ''; if (k) k.value = p.apiKey || ''; if (m) m.value = p.model || '';
+    };
+
+    window.__pmSetMode = (v) => {
+        window.__pmConfig.useIndependent = !!v;
+        try { localStorage.setItem('ST_SMS_CONFIG', JSON.stringify(window.__pmConfig)); } catch {}
+        const a = document.getElementById('pm-mode-main'), b = document.getElementById('pm-mode-indep'), t = document.getElementById('pm-mode-tip');
+        if (a && b) { a.classList.toggle('pm-mode-active', !v); b.classList.toggle('pm-mode-active', !!v); }
+        if (t) t.textContent = v ? '🔌 独立API' : '🏠 主API';
+    };
+
+    function loadBidirectional() { try { window.__pmBidirectional = JSON.parse(localStorage.getItem('ST_SMS_BIDIRECTIONAL')) || {}; } catch { window.__pmBidirectional = {}; } }
+    function saveBidirectional() { try { localStorage.setItem('ST_SMS_BIDIRECTIONAL', JSON.stringify(window.__pmBidirectional)); } catch {} }
+
+    function applyBidirectionalInjection() {
+        const c = getCtx(); if (!c || typeof c.setExtensionPrompt !== 'function') return;
+        const id = getStorageId(), checked = window.__pmBidirectional[id] || [], histories = window.__pmHistories[id] || {};
+        if (!checked.length) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, 4); } catch {} return; }
+        const blocks = checked.map(name => {
+            const conv = (histories[name] || []).slice(-BIDIRECTIONAL_LIMIT);
+            if (!conv.length) return '';
+            const lines = conv.map(m => { const t = (m.content || '').replace(/\s*\/\s*/g, '。'); return m.role === 'user' ? `用户：${t}` : `${name}：${t}`; }).join('\n');
+            return `【与 ${name} 的短信 — 仅 ${name} 与用户知晓】\n${lines}`;
+        }).filter(Boolean).join('\n\n');
+        if (!blocks) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, 4); } catch {} return; }
+        try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, `[手机短信记忆 — 私密]\n${blocks}\n[结束]`, 1, 4); } catch {}
+    }
+
+    window.__pmToggleBidirectional = (name) => {
+        const id = getStorageId(), arr = window.__pmBidirectional[id] || [], idx = arr.indexOf(name);
+        if (idx >= 0) arr.splice(idx, 1);
+        else { if (arr.length >= MAX_BIDIRECTIONAL) return; arr.push(name); }
+        window.__pmBidirectional[id] = arr; saveBidirectional(); applyBidirectionalInjection(); window.__pmShowList();
+    };
+
+    async function gatherContext() {
+        const c = getCtx(), char = c?.characters?.[c.characterId] || {};
+        const cleanMsg = (s) => (s || '').replace(/```[\s\S]*?```/g, '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<[^>]+>/g, '').trim();
+        const mainChatArr = (c?.chat || []).slice(-8).map(m => ({ who: m.is_user ? '用户' : (m.name || '角色'), content: cleanMsg(m.mes || '') })).filter(m => m.content);
+        const mainChatText = mainChatArr.map(m => `${m.who}：${m.content}`).join('\n');
+        let worldBookText = '';
+        try {
+            if (typeof c?.getWorldInfoPrompt === 'function') {
+                const wi = await c.getWorldInfoPrompt((c.chat || []).map(m => m.mes || '').slice(-10), 4096, false);
+                worldBookText = wi?.worldInfoString || wi?.worldInfoBefore || '';
+                if (!worldBookText && wi && typeof wi === 'object') worldBookText = [wi.worldInfoBefore, wi.worldInfoAfter].filter(Boolean).join('\n');
+            }
+        } catch {}
+        return { cardDesc: char.description ?? '', cardPersonality: char.personality ?? '', cardScenario: char.scenario ?? '', cardFirstMes: char.first_mes ?? '', cardMesExample: char.mes_example ?? '', mainChatText, worldBookText };
+    }
+
+    function bindIsland(el, handle) {
+        let isDragging = false, startX, startY, startTX = 0, startTY = 0, moved = false;
+        const getCoord = (e) => e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
+        const getT = () => { const m = (el.style.transform || '').match(/translate\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px/); return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]) } : { x: 0, y: 0 }; };
+        const onStart = (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            isDragging = true; moved = false;
+            const coords = getCoord(e); startX = coords.x; startY = coords.y;
+            const t = getT(); startTX = t.x; startTY = t.y;
+            el.style.transition = 'none';
+            if (e.cancelable) e.preventDefault();
+        };
+        const onMove = (e) => {
+            if (!isDragging) return;
+            const coords = getCoord(e), dx = coords.x - startX, dy = coords.y - startY;
+            if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+            moved = true; if (e.cancelable) e.preventDefault();
+            el.style.setProperty('transform', `translate(${startTX + dx}px, ${startTY + dy}px)`, 'important');
+        };
+        const onEnd = () => { if (!isDragging) return; isDragging = false; el.style.transition = '.35s cubic-bezier(.18,.89,.32,1.2)'; if (!moved) window.__pmToggleMin(); };
+        handle.addEventListener('mousedown', onStart); window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onEnd);
+        handle.addEventListener('touchstart', onStart, { passive: false }); window.addEventListener('touchmove', onMove, { passive: false }); window.addEventListener('touchend', onEnd);
+    }
+
+    function escapeHtml(s) { return (s || '').replace(/</g, '<').replace(/>/g, '>'); }
+    function escapeAttr(s) { return (s || '').replace(/"/g, '"').replace(/</g, '<'); }
+
+    // 🔧 Fix: 群聊语音条不被自定义左色影响
+    function createBubbles(text, side, senderName) {
+        const results = [];
+        const re = new RegExp(SPECIAL_RE.source, 'gi');
+        let last = 0, m;
+        const pushPlain = (str) => {
+            const plain = str.trim(); if (!plain) return;
+            if (senderName && side === 'left') {
+                const wrapper = document.createElement('div'); wrapper.className = 'pm-group-bubble-wrap';
+                const nameTag = document.createElement('div'); nameTag.className = 'pm-group-name'; nameTag.textContent = senderName;
+                if (groupColorMap[senderName]) nameTag.style.color = groupColorMap[senderName].bg;
+                wrapper.appendChild(nameTag);
+                const inner = document.createElement('div'); inner.className = `pm-bubble pm-${side}`;
+                if (groupColorMap[senderName]) {
+                    inner.style.setProperty('background', groupColorMap[senderName].bg, 'important');
+                    inner.style.setProperty('color', groupColorMap[senderName].text, 'important');
+                }
+                inner.innerHTML = escapeHtml(plain).replace(/\n/g, '<br>');
+                wrapper.appendChild(inner); results.push(wrapper); return;
+            }
+            const b = document.createElement('div'); b.className = `pm-bubble pm-${side}`;
+            b.innerHTML = escapeHtml(plain).replace(/\n/g, '<br>');
+            results.push(b);
+        };
+        while ((m = re.exec(text)) !== null) {
+            if (m.index > last) pushPlain(text.slice(last, m.index));
+            const kind = normalizeKeyword(m[1]);
+            const isGroupLeft = senderName && side === 'left';
+            let container;
+            if (isGroupLeft) {
+                container = document.createElement('div'); container.className = 'pm-group-bubble-wrap';
+                const nameTag = document.createElement('div'); nameTag.className = 'pm-group-name'; nameTag.textContent = senderName;
+                if (groupColorMap[senderName]) nameTag.style.color = groupColorMap[senderName].bg;
+                container.appendChild(nameTag);
+            }
+            const b = document.createElement('div'); b.className = `pm-bubble pm-${side} pm-special`;
+            if (kind === '转账') {
+                const amount = parseFloat(m[2]) || 0;
+                b.innerHTML = `<div class="pm-transfer-card"><div class="pm-t-icon">¥</div><div class="pm-t-info"><b>转账</b><span>¥${amount.toFixed(2)}</span></div></div>`;
+            } else if (kind === '图片') {
+                b.innerHTML = `<div class="pm-img-card">🖼️ ${escapeHtml(m[2].trim())}</div>`;
+            } else {
+                const txt = m[2].trim(), len = [...txt].length;
+                const dur = Math.min(VOICE_MAX_SEC, Math.max(1, len * 2));
+                const width = Math.min(240, Math.max(100, 80 + len * 5));
+                // 🔧 群聊语音条用群聊角色色，覆盖默认
+                let voiceStyle = '';
+                let voiceClass = `pm-voice-${side}`;
+                if (isGroupLeft && groupColorMap[senderName]) {
+                    const gc = groupColorMap[senderName];
+                    voiceStyle = `width:${width}px;background:${gc.bg} !important;color:${gc.text} !important;`;
+                    voiceClass = 'pm-voice-left pm-voice-group';
+                } else {
+                    voiceStyle = `width:${width}px`;
+                }
+                b.innerHTML = `<div class="pm-voice-wrap"><div class="${voiceClass}" style="${voiceStyle}" onclick="window.__pmToggleVoice(this)"><span class="pm-voice-icon">🎤</span><span class="pm-voice-wave"><i></i><i></i><i></i></span><span class="pm-voice-dur">${dur}"</span></div><div class="pm-voice-text" style="display:none;">${escapeHtml(txt)}</div></div>`;
+            }
+            if (container) { container.appendChild(b); results.push(container); }
+            else results.push(b);
+            last = m.index + m[0].length;
+        }
+        if (last < text.length) pushPlain(text.slice(last));
+        if (!results.length) pushPlain(text);
         return results;
     }
 
-    window.__pmToggleVoice=(el)=>{const t=el.parentElement?.querySelector('.pm-voice-text');if(t)t.style.display=t.style.display==='none'?'block':'none';};
-    function cleanResponse(raw){return(raw??'').replace(/<think>[\s\S]*?<\/think>/gi,'').replace(/<thinking>[\s\S]*?<\/thinking>/gi,'').replace(/<reasoning>[\s\S]*?<\/reasoning>/gi,'').replace(/<reflection>[\s\S]*?<\/reflection>/gi,'').replace(/<inner_thought>[\s\S]*?<\/inner_thought>/gi,'').replace(/<scene>[\s\S]*?<\/scene>/gi,'').replace(/<narration>[\s\S]*?<\/narration>/gi,'').replace(/<action>[\s\S]*?<\/action>/gi,'').replace(/```[\s\S]*?```/g,'').replace(/^.*【[^】]{2,}】.*$/gm,'').replace(/---+[\s\S]*$/g,'').replace(/<[^>]+>/g,'').trim();}
-    function splitToSentences(s){return(s||'').split(/\s*\/\s*/).map(x=>x.trim()).filter(x=>x.length>0).slice(0,8);}
+    window.__pmToggleVoice = (el) => {
+        const txt = el.parentElement?.querySelector('.pm-voice-text');
+        if (txt) txt.style.display = txt.style.display === 'none' ? 'block' : 'none';
+    };
 
-    function parseGroupResponse(raw){
-        const cleaned=cleanResponse(raw),lines=cleaned.split('\n').filter(l=>l.trim());
-        const result=[],ms=new Set(groupMembers.map(n=>n.toLowerCase()));
-        for(const line of lines){
-            const mt=line.match(/^(.{1,20})[：:]\s*(.+)$/);
-            if(mt&&ms.has(mt[1].trim().toLowerCase())){
-                const name=groupMembers.find(n=>n.toLowerCase()===mt[1].trim().toLowerCase())||mt[1].trim();
-                const sents=mt[2].split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean).slice(0,8);
-                if(sents.length)result.push({name,sentences:sents});
-            }else{
-                const sents=line.split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean).slice(0,8);
-                if(sents.length){if(result.length>0)result[result.length-1].sentences.push(...sents);else result.push({name:groupMembers[0]||'???',sentences:sents});}
+    function cleanResponse(raw) {
+        return (raw ?? '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+            .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<reflection>[\s\S]*?<\/reflection>/gi, '')
+            .replace(/<inner_thought>[\s\S]*?<\/inner_thought>/gi, '')
+            .replace(/<scene>[\s\S]*?<\/scene>/gi, '').replace(/<narration>[\s\S]*?<\/narration>/gi, '')
+            .replace(/<action>[\s\S]*?<\/action>/gi, '').replace(/```[\s\S]*?```/g, '')
+            .replace(/^.*【[^】]{2,}】.*$/gm, '').replace(/---+[\s\S]*$/g, '')
+            .replace(/<[^>]+>/g, '').trim();
+    }
+
+    function splitToSentences(str) {
+        return (str || '').split(/\s*\/\s*/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 8);
+    }
+
+    function parseGroupResponse(raw) {
+        const cleaned = cleanResponse(raw);
+        const lines = cleaned.split('\n').filter(l => l.trim());
+        const result = [];
+        const memberSet = new Set(groupMembers.map(n => n.toLowerCase()));
+        for (const line of lines) {
+            const m = line.match(/^(.{1,20})[：:]\s*(.+)$/);
+            if (m && memberSet.has(m[1].trim().toLowerCase())) {
+                const name = groupMembers.find(n => n.toLowerCase() === m[1].trim().toLowerCase()) || m[1].trim();
+                const sentences = m[2].split(/\s*\/\s*/).map(s => s.trim()).filter(Boolean).slice(0, 8);
+                if (sentences.length) result.push({ name, sentences });
+            } else {
+                const sentences = line.split(/\s*\/\s*/).map(s => s.trim()).filter(Boolean).slice(0, 8);
+                if (sentences.length) {
+                    if (result.length > 0) result[result.length - 1].sentences.push(...sentences);
+                    else result.push({ name: groupMembers[0] || '???', sentences });
+                }
             }
         }
         return result;
     }
-    // ── API 调用 ──
-    async function fetchSMS(userMsg){
-        const c=getCtx();conversationHistory.push({role:'user',content:userMsg});
-        const ctx=await gatherContext();
-        const{cardDesc,cardPersonality,cardScenario,cardFirstMes,cardMesExample,mainChatText,worldBookText}=ctx;
-        const smsHist=conversationHistory.slice(-CONTEXT_LIMIT).map(m=>{const cl=cleanResponse(m.content);return m.role==='user'?`用户：${cl}`:(isGroupChat?cl:`${currentPersona}：${cl}`);}).join('\n');
+    async function fetchSMS(userMsg) {
+        const c = getCtx();
+        conversationHistory.push({ role: 'user', content: userMsg });
+        const ctxData = await gatherContext();
+        const { cardDesc, cardPersonality, cardScenario, cardFirstMes, cardMesExample, mainChatText, worldBookText } = ctxData;
 
-        let injected,sysPr;
-        if(isGroupChat){
-            const ml=groupMembers.join('、');
-            const grpInfo=groupDisplayName?`群名「${groupDisplayName}」，`:'';
-            injected=`[群聊短信——最高优先级]\n${grpInfo}成员：${ml}\n你同时扮演以上角色与用户群聊。\n\n输出格式：\n角色名：消息1 / 消息2\n另一角色：消息3\n\n规则：\n- 根据剧情性格决定谁发言，可穿插\n- 每角色0-8句，用/分隔\n- 不必所有人都说话\n- 禁止旁白心理场景标签\n- 特殊格式（中文）：(转账+金额)(图片+描述)(语音+内容)\n- 严禁英文格式\n${cardScenario?'【场景】\n'+cardScenario+'\n':''}${worldBookText?'【世界书】\n'+worldBookText+'\n':''}群聊历史：\n${smsHist}\n\n用户：${userMsg}`;
-            sysPr=[`你同时扮演${ml}在群聊「${groupDisplayName||'群聊'}」中与用户对话。`,cardDesc?`【角色设定】\n${cardDesc}`:'',cardPersonality?`【性格】\n${cardPersonality}`:'',cardScenario?`【场景】\n${cardScenario}`:'',worldBookText?`【世界书】\n${worldBookText}`:'',mainChatText?`【主线对话】\n${mainChatText}`:'','',`输出：角色名：消息/消息。可穿插，每角色0-8句。`,'特殊格式（中文）：(转账+金额)(图片+描述)(语音+内容)。严禁英文格式标签旁白。'].filter(Boolean).join('\n\n');
-        }else{
-            const ctxB=[cardScenario?`【场景参考】\n${cardScenario}`:'',cardMesExample?`【对话示例】\n${cardMesExample}`:''].filter(Boolean).join('\n\n');
-            injected=`\n[短信模式——最高优先级]\n角色：${currentPersona}\n以${currentPersona}身份短信回复。\n${ctxB?ctxB+'\n\n':''}规则：\n- 3到8句，/分隔\n- 禁止旁白心理场景标签\n- 特殊格式（中文）：(转账+金额)(图片+描述)(语音+内容)\n- 严禁英文格式\n- 偶尔可(语音+内容)\n\n短信历史：\n${smsHist}\n\n用户：${userMsg}\n${currentPersona}：`;
-            sysPr=[`你扮演"${currentPersona}"短信聊天。`,cardDesc?`【角色设定】\n${cardDesc}`:'',cardPersonality?`【性格】\n${cardPersonality}`:'',cardScenario?`【场景】\n${cardScenario}`:'',cardFirstMes?`【开场白】\n${cardFirstMes}`:'',cardMesExample?`【对话示例】\n${cardMesExample}`:'',worldBookText?`【世界书】\n${worldBookText}`:'',mainChatText?`【主线对话】\n${mainChatText}`:'','','3-8句，/分隔。特殊格式（中文）。严禁英文格式标签旁白状态栏。'].filter(Boolean).join('\n\n');
+        const smsHistoryText = conversationHistory.slice(-CONTEXT_LIMIT).map(m => {
+            const clean = cleanResponse(m.content);
+            return m.role === 'user' ? `用户：${clean}` : (isGroupChat ? clean : `${currentPersona}：${clean}`);
+        }).join('\n');
+
+        let injectedInstruction, systemPrompt;
+
+        if (isGroupChat) {
+            const memberList = groupMembers.join('、');
+            const groupName = groupDisplayName || `群聊：${memberList}`;
+            const groupRules = `
+[群聊短信模式——最高优先级]
+群聊名称：${groupName}
+群聊成员：${memberList}
+你同时扮演以上所有角色与用户聊天。
+
+输出格式（严格遵守）：
+角色名：消息1 / 消息2
+另一角色名：消息3
+角色名：消息4
+
+规则：
+- 根据剧情和每个角色性格决定谁发言，可以穿插
+- 每个角色每次0-8句，用 / 分隔
+- 不是所有角色都必须发言，沉默也是合理的
+- 禁止旁白、心理描写、场景描述
+- 特殊格式（中文）：(转账+金额) (图片+描述) (语音+内容)
+- 严禁英文格式`;
+            injectedInstruction = `${groupRules}\n\n${cardScenario ? '【场景】\n' + cardScenario + '\n\n' : ''}${worldBookText ? '【世界书】\n' + worldBookText + '\n\n' : ''}群聊历史：\n${smsHistoryText}\n\n用户：${userMsg}`;
+            systemPrompt = [
+                `你同时扮演 ${memberList} 在群聊「${groupName}」中与用户对话。`,
+                cardDesc ? `【角色设定】\n${cardDesc}` : '',
+                cardPersonality ? `【性格】\n${cardPersonality}` : '',
+                cardScenario ? `【场景】\n${cardScenario}` : '',
+                worldBookText ? `【世界书】\n${worldBookText}` : '',
+                mainChatText ? `【主线最近对话】\n${mainChatText}` : '',
+                '',
+                `输出格式：角色名：消息 / 消息（每个角色0-8句）`,
+                `角色可穿插发言，不必所有人都说话。`,
+                '特殊格式（必须中文）：(转账+金额) (图片+描述) (语音+内容)。严禁英文格式。',
+                '禁止任何标签格式旁白选项状态栏。',
+            ].filter(Boolean).join('\n\n');
+        } else {
+            const contextBlockMain = [
+                cardScenario ? `【场景参考】\n${cardScenario}` : '',
+                cardMesExample ? `【对话示例】\n${cardMesExample}` : '',
+            ].filter(Boolean).join('\n\n');
+            injectedInstruction = `\n[短信模式指令——最高优先级]\n当前角色：${currentPersona}\n以${currentPersona}的身份用手机短信方式回复。\n${contextBlockMain ? contextBlockMain + '\n\n' : ''}规则：\n- 只输出短信文字，3到8句，每句用 / 分隔\n- 禁止旁白心理描写场景描述角色名前缀标签格式\n- 特殊格式（中文）：(转账+金额) (图片+描述) (语音+内容)\n- 严禁英文格式\n\n短信对话历史：\n${smsHistoryText}\n\n用户：${userMsg}\n${currentPersona}：`;
+            systemPrompt = [
+                `你正在扮演"${currentPersona}"通过手机短信与用户聊天。`,
+                cardDesc ? `【角色设定】\n${cardDesc}` : '',
+                cardPersonality ? `【性格】\n${cardPersonality}` : '',
+                cardScenario ? `【场景】\n${cardScenario}` : '',
+                cardFirstMes ? `【开场白参考】\n${cardFirstMes}` : '',
+                cardMesExample ? `【对话示例】\n${cardMesExample}` : '',
+                worldBookText ? `【世界书】\n${worldBookText}` : '',
+                mainChatText ? `【主线最近对话】\n${mainChatText}` : '',
+                '', '只输出3到8句短信，每句用 / 分隔。',
+                '特殊格式（必须中文）：(转账+金额) (图片+描述) (语音+内容)。严禁英文格式。',
+                '禁止任何标签格式旁白选项状态栏。',
+            ].filter(Boolean).join('\n\n');
         }
-        try{
-            let raw='';const cfg=window.__pmConfig,useI=cfg.useIndependent&&cfg.apiUrl&&cfg.apiKey;
-            if(useI){
-                const msgs=[{role:'system',content:sysPr},...conversationHistory.slice(-CONTEXT_LIMIT).map(m=>({role:m.role,content:cleanResponse(m.content)}))];
-                const{chatUrl}=normalizeApiUrls(cfg.apiUrl);
-                const r=await fetch(chatUrl,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${cfg.apiKey}`},body:JSON.stringify({model:cfg.model||'gpt-4o-mini',messages:msgs,max_tokens:isGroupChat?600:300,temperature:0.85})});
-                const j=await r.json();raw=j.choices?.[0]?.message?.content??'';
-            }else{raw=await c.generateQuietPrompt(injected,false,false);}
-            console.log('[phone-mode] raw:',raw?.length,JSON.stringify((raw||'').slice(0,300)));
+
+        try {
+            let raw = '';
+            const cfg = window.__pmConfig;
+            const useIndep = cfg.useIndependent && cfg.apiUrl && cfg.apiKey;
+            if (useIndep) {
+                const messages = [
+                    { role: 'system', content: systemPrompt },
+                    ...conversationHistory.slice(-CONTEXT_LIMIT).map(m => ({ role: m.role, content: cleanResponse(m.content) }))
+                ];
+                const { chatUrl } = normalizeApiUrls(cfg.apiUrl);
+                const resp = await fetch(chatUrl, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}` },
+                    body: JSON.stringify({ model: cfg.model || 'gpt-4o-mini', messages, max_tokens: isGroupChat ? 600 : 300, temperature: 0.85 })
+                });
+                const json = await resp.json();
+                raw = json.choices?.[0]?.message?.content ?? '';
+            } else {
+                raw = await c.generateQuietPrompt(injectedInstruction, false, false);
+            }
 
             let resultData;
-            if(isGroupChat){
-                const parsed=parseGroupResponse(raw);
-                if(parsed.length){conversationHistory.push({role:'assistant',content:parsed.map(p=>`${p.name}：${p.sentences.join(' / ')}`).join('\n')});resultData={type:'group',data:parsed};}
-                else{conversationHistory.push({role:'assistant',content:raw});resultData={type:'group',data:[{name:groupMembers[0]||'?',sentences:['（解析失败）']}]};}
-            }else{
-                const cl=cleanResponse(raw);let sents=splitToSentences(cl);
-                if(!sents.length&&raw?.trim())sents=splitToSentences(raw.replace(/<think>[\s\S]*?<\/think>/gi,'').replace(/<[^>]+>/g,''));
-                if(!sents.length)sents=!raw?.trim()?['（空响应）']:['（格式无法解析）'];
-                conversationHistory.push({role:'assistant',content:sents.join(' / ')});resultData={type:'single',data:sents};
+            if (isGroupChat) {
+                const parsed = parseGroupResponse(raw);
+                if (parsed.length) {
+                    const contentParts = parsed.map(p => `${p.name}：${p.sentences.join(' / ')}`);
+                    conversationHistory.push({ role: 'assistant', content: contentParts.join('\n') });
+                    resultData = { type: 'group', data: parsed };
+                } else {
+                    conversationHistory.push({ role: 'assistant', content: raw });
+                    resultData = { type: 'group', data: [{ name: groupMembers[0] || '???', sentences: ['（群聊格式解析失败）'] }] };
+                }
+            } else {
+                const clean = cleanResponse(raw);
+                let sentences = splitToSentences(clean);
+                if (!sentences.length && raw?.trim()) sentences = splitToSentences(raw.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<[^>]+>/g, ''));
+                if (!sentences.length) sentences = !raw?.trim() ? ['（空响应）'] : ['（格式无法解析）'];
+                conversationHistory.push({ role: 'assistant', content: sentences.join(' / ') });
+                resultData = { type: 'single', data: sentences };
             }
-            const id=getStorageId();if(!window.__pmHistories[id])window.__pmHistories[id]={};
-            window.__pmHistories[id][currentPersona]=conversationHistory.slice(-SAVE_LIMIT);
-            try{localStorage.setItem('ST_SMS_DATA_V2',JSON.stringify(window.__pmHistories));}catch{}
-            applyBidirectionalInjection();return resultData;
-        }catch(e){console.error('[phone-mode]',e);return isGroupChat?{type:'group',data:[{name:'系统',sentences:[`（错误：${e?.message||e}）`]}]}:{type:'single',data:[`（错误：${e?.message||e}）`]};}
+
+            const id = getStorageId();
+            if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
+            window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
+            try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+            applyBidirectionalInjection();
+            return resultData;
+        } catch (e) {
+            console.error('[phone-mode]', e);
+            return isGroupChat
+                ? { type: 'group', data: [{ name: '系统', sentences: [`（错误：${e?.message || e}）`] }] }
+                : { type: 'single', data: [`（错误：${e?.message || e}）`] };
+        }
     }
 
-    function addBubble(text,side,sender){const list=phoneWindow?.querySelector('.pm-msg-list');if(!list)return;createBubbles(text,side,sender).forEach(b=>{b.dataset=b.dataset||{};b.dataset.side=side;b.dataset.text=text;list.appendChild(b);});list.scrollTop=list.scrollHeight;}
-    function addNote(text){const list=phoneWindow?.querySelector('.pm-msg-list');if(!list)return;const n=document.createElement('div');n.className='pm-note';n.textContent=text;list.appendChild(n);list.scrollTop=list.scrollHeight;}
-    function showTyping(){const list=phoneWindow?.querySelector('.pm-msg-list');if(!list||document.getElementById('pm-typing'))return;const t=document.createElement('div');t.id='pm-typing';t.className='pm-bubble pm-left pm-typing-bubble';t.innerHTML='<span></span><span></span><span></span>';list.appendChild(t);list.scrollTop=list.scrollHeight;}
-    function hideTyping(){document.getElementById('pm-typing')?.remove();}
+    function addBubble(text, side, senderName) {
+        const list = phoneWindow?.querySelector('.pm-msg-list'); if (!list) return;
+        createBubbles(text, side, senderName).forEach(b => {
+            if (b.classList?.contains('pm-bubble')) { b.dataset.side = side; b.dataset.text = text; }
+            else if (b.classList?.contains('pm-group-bubble-wrap')) {
+                b.dataset.side = side; b.dataset.text = text;
+                const inner = b.querySelector('.pm-bubble'); if (inner) { inner.dataset.side = side; inner.dataset.text = text; }
+            }
+            list.appendChild(b);
+        });
+        list.scrollTop = list.scrollHeight;
+    }
+    function addNote(text) {
+        const list = phoneWindow?.querySelector('.pm-msg-list'); if (!list) return;
+        const n = document.createElement('div'); n.className = 'pm-note'; n.textContent = text;
+        list.appendChild(n); list.scrollTop = list.scrollHeight;
+    }
+    function showTyping() {
+        const list = phoneWindow?.querySelector('.pm-msg-list');
+        if (!list || document.getElementById('pm-typing')) return;
+        const t = document.createElement('div'); t.id = 'pm-typing'; t.className = 'pm-bubble pm-left pm-typing-bubble';
+        t.innerHTML = '<span></span><span></span><span></span>';
+        list.appendChild(t); list.scrollTop = list.scrollHeight;
+    }
+    function hideTyping() { document.getElementById('pm-typing')?.remove(); }
 
-    window.__pmSend=async()=>{
-        if(isGenerating)return;const input=phoneWindow.querySelector('.pm-input');
-        const val=input.value.trim();if(!val)return;input.value='';
-        const protect=val.replace(/[\(（][^)）]+[\)\）]/g,m=>m.replace(/\//g,'\u0001'));
-        protect.split(/[/／]/).map(s=>s.replace(/\u0001/g,'/').trim()).filter(Boolean).forEach(ch=>addBubble(ch,'right'));
-        isGenerating=true;input.disabled=true;const btn=phoneWindow.querySelector('.pm-up-btn');if(btn)btn.disabled=true;
-        showTyping();const result=await fetchSMS(val);hideTyping();
-        if(result.type==='group'){for(const bl of result.data)for(const s of bl.sentences){await new Promise(r=>setTimeout(r,120));addBubble(s,'left',bl.name);}}
-        else{for(const s of result.data){await new Promise(r=>setTimeout(r,150));addBubble(s,'left');}}
-        isGenerating=false;input.disabled=false;if(btn)btn.disabled=false;input.focus();
+    window.__pmSend = async () => {
+        if (isGenerating) return;
+        const input = phoneWindow.querySelector('.pm-input');
+        const val = input.value.trim(); if (!val) return; input.value = '';
+        const protect = val.replace(/[\(（][^)）]+[\)\）]/g, m => m.replace(/\//g, '\u0001'));
+        protect.split(/[/／]/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
+            .forEach(chunk => addBubble(chunk, 'right'));
+        isGenerating = true; input.disabled = true;
+        const btn = phoneWindow.querySelector('.pm-up-btn'); if (btn) btn.disabled = true;
+        showTyping();
+        const result = await fetchSMS(val);
+        hideTyping();
+        if (result.type === 'group') {
+            for (const block of result.data) {
+                for (const s of block.sentences) {
+                    await new Promise(r => setTimeout(r, 120));
+                    addBubble(s, 'left', block.name);
+                }
+            }
+        } else {
+            for (const s of result.data) { await new Promise(r => setTimeout(r, 150)); addBubble(s, 'left'); }
+        }
+        isGenerating = false; input.disabled = false; if (btn) btn.disabled = false; input.focus();
     };
 
-    window.__pmToggleSelect=()=>{
-        isSelectMode=!isSelectMode;const list=phoneWindow?.querySelector('.pm-msg-list');
-        const tb=phoneWindow?.querySelector('.pm-trash-btn'),cb=phoneWindow?.querySelector('.pm-confirm-bar');if(!list)return;
-        if(isSelectMode){tb.style.color='#ff3b30';cb.style.display='flex';list.querySelectorAll('.pm-bubble,.pm-group-bubble-wrap').forEach(b=>{if(b.id==='pm-typing'||b.closest('.pm-select-wrap'))return;const w=document.createElement('div');w.className='pm-select-wrap';const c=document.createElement('div');c.className='pm-custom-check';c.dataset.checked='0';c.onclick=()=>{c.dataset.checked=c.dataset.checked==='0'?'1':'0';};b.parentNode.insertBefore(w,b);w.appendChild(c);w.appendChild(b);w.dataset.side=b.dataset.side||'';w.dataset.text=b.dataset.text||'';});}
-        else{tb.style.color='';cb.style.display='none';list.querySelectorAll('.pm-select-wrap').forEach(w=>{const b=w.querySelector('.pm-bubble,.pm-group-bubble-wrap');if(b)w.parentNode.insertBefore(b,w);w.remove();});}
+    window.__pmToggleSelect = () => {
+        isSelectMode = !isSelectMode;
+        const list = phoneWindow?.querySelector('.pm-msg-list');
+        const trashBtn = phoneWindow?.querySelector('.pm-trash-btn');
+        const confirmBar = phoneWindow?.querySelector('.pm-confirm-bar');
+        if (!list) return;
+        if (isSelectMode) {
+            trashBtn.style.color = '#ff3b30'; confirmBar.style.display = 'flex';
+            list.querySelectorAll('.pm-bubble, .pm-group-bubble-wrap').forEach(b => {
+                if (b.id === 'pm-typing' || b.closest('.pm-select-wrap')) return;
+                const wrap = document.createElement('div'); wrap.className = 'pm-select-wrap';
+                const cb = document.createElement('div'); cb.className = 'pm-custom-check'; cb.dataset.checked = '0';
+                cb.onclick = () => { cb.dataset.checked = cb.dataset.checked === '0' ? '1' : '0'; };
+                b.parentNode.insertBefore(wrap, b);
+                wrap.appendChild(cb); wrap.appendChild(b);
+                wrap.dataset.side = b.dataset.side || ''; wrap.dataset.text = b.dataset.text || '';
+            });
+        } else {
+            trashBtn.style.color = ''; confirmBar.style.display = 'none';
+            list.querySelectorAll('.pm-select-wrap').forEach(wrap => {
+                const b = wrap.querySelector('.pm-bubble, .pm-group-bubble-wrap');
+                if (b) wrap.parentNode.insertBefore(b, wrap); wrap.remove();
+            });
+        }
     };
-    window.__pmDeleteSelected=()=>{const list=phoneWindow?.querySelector('.pm-msg-list');if(!list)return;const td=new Set();list.querySelectorAll('.pm-select-wrap').forEach(w=>{const c=w.querySelector('.pm-custom-check');if(c?.dataset.checked==='1'){td.add(w.dataset.text);w.remove();}else{const b=w.querySelector('.pm-bubble,.pm-group-bubble-wrap');if(b)w.parentNode.insertBefore(b,w);w.remove();}});if(td.size>0){conversationHistory=conversationHistory.filter(m=>!m.content.split(/\s*\/\s*/).some(p=>td.has(p.trim())));const id=getStorageId();if(!window.__pmHistories[id])window.__pmHistories[id]={};window.__pmHistories[id][currentPersona]=conversationHistory.slice(-SAVE_LIMIT);try{localStorage.setItem('ST_SMS_DATA_V2',JSON.stringify(window.__pmHistories));}catch{}}isSelectMode=false;phoneWindow?.querySelector('.pm-trash-btn')?.style.removeProperty('color');const bar=phoneWindow?.querySelector('.pm-confirm-bar');if(bar)bar.style.display='none';};
 
-    window.__pmShowModelPicker=()=>{const ex=document.getElementById('pm-model-dropdown');if(ex){ex.remove();return;}if(!__pmModelList.length){const s=document.getElementById('pm-api-status');if(s){s.textContent='⚠️ 先拉取模型';s.style.color='#ff9500';}return;}const input=document.getElementById('pm-cfg-model'),rect=input.getBoundingClientRect();const dd=document.createElement('div');dd.id='pm-model-dropdown';dd.className='pm-model-dropdown';if(POPOVER_SUPPORTED)dd.setAttribute('popover','manual');dd.innerHTML=`<input class="pm-model-search" placeholder="🔍 搜索..."/><div class="pm-model-options"></div>`;dd.style.left=rect.left+'px';dd.style.top=(rect.bottom+4)+'px';dd.style.width=rect.width+'px';document.body.appendChild(dd);if(dd.showPopover)try{dd.showPopover();}catch{}const od=dd.querySelector('.pm-model-options');const render=(f='')=>{const fl=f.toLowerCase(),fi=__pmModelList.filter(m=>!fl||m.toLowerCase().includes(fl));od.innerHTML=fi.length?fi.map(m=>`<div class="pm-model-opt" data-m="${escapeAttr(m)}">${escapeHtml(m)}</div>`).join(''):'<div class="pm-model-empty">无匹配</div>';od.querySelectorAll('.pm-model-opt').forEach(el=>el.addEventListener('click',()=>{document.getElementById('pm-cfg-model').value=el.dataset.m;dd.remove();}));};render();dd.querySelector('.pm-model-search').addEventListener('input',function(){render(this.value);});dd.querySelector('.pm-model-search').focus();setTimeout(()=>{const closer=(e)=>{if(!dd.contains(e.target)&&e.target.id!=='pm-model-arrow'){dd.remove();document.removeEventListener('click',closer,true);}};document.addEventListener('click',closer,true);},0);};
+    window.__pmDeleteSelected = () => {
+        const list = phoneWindow?.querySelector('.pm-msg-list'); if (!list) return;
+        const toDelete = new Set();
+        list.querySelectorAll('.pm-select-wrap').forEach(wrap => {
+            const cb = wrap.querySelector('.pm-custom-check');
+            if (cb?.dataset.checked === '1') { toDelete.add(wrap.dataset.text); wrap.remove(); }
+            else { const b = wrap.querySelector('.pm-bubble, .pm-group-bubble-wrap'); if (b) wrap.parentNode.insertBefore(b, wrap); wrap.remove(); }
+        });
+        if (toDelete.size > 0) {
+            conversationHistory = conversationHistory.filter(m => !m.content.split(/\s*\/\s*/).some(p => toDelete.has(p.trim())));
+            const id = getStorageId();
+            if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
+            window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
+            try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+        }
+        isSelectMode = false;
+        phoneWindow?.querySelector('.pm-trash-btn')?.style.removeProperty('color');
+        const bar = phoneWindow?.querySelector('.pm-confirm-bar'); if (bar) bar.style.display = 'none';
+    };
 
-    function makeOverlay(html){document.getElementById('pm-overlay')?.remove();const ov=document.createElement('div');ov.id='pm-overlay';if(POPOVER_SUPPORTED)ov.setAttribute('popover','manual');ov.innerHTML=html;ov.addEventListener('click',e=>{if(e.target===ov)ov.remove();});document.body.appendChild(ov);if(ov.showPopover)try{ov.showPopover();}catch{}return ov;}
+    window.__pmShowModelPicker = () => {
+        const existing = document.getElementById('pm-model-dropdown');
+        if (existing) { existing.remove(); return; }
+        if (!__pmModelList.length) { const s = document.getElementById('pm-api-status'); if (s) { s.textContent = '⚠️ 先拉取模型'; s.style.color = '#ff9500'; } return; }
+        const input = document.getElementById('pm-cfg-model'), rect = input.getBoundingClientRect();
+        const dd = document.createElement('div'); dd.id = 'pm-model-dropdown'; dd.className = 'pm-model-dropdown';
+        if (POPOVER_SUPPORTED) dd.setAttribute('popover', 'manual');
+        dd.innerHTML = `<input class="pm-model-search" placeholder="🔍 搜索..." /><div class="pm-model-options"></div>`;
+        dd.style.left = rect.left + 'px'; dd.style.top = (rect.bottom + 4) + 'px'; dd.style.width = rect.width + 'px';
+        document.body.appendChild(dd); if (dd.showPopover) try { dd.showPopover(); } catch {}
+        const optsDiv = dd.querySelector('.pm-model-options');
+        const render = (f = '') => {
+            const fl = f.toLowerCase(), filtered = __pmModelList.filter(m => !fl || m.toLowerCase().includes(fl));
+            optsDiv.innerHTML = filtered.length ? filtered.map(m => `<div class="pm-model-opt" data-m="${escapeAttr(m)}">${escapeHtml(m)}</div>`).join('') : '<div class="pm-model-empty">无匹配</div>';
+            optsDiv.querySelectorAll('.pm-model-opt').forEach(el => el.addEventListener('click', () => { document.getElementById('pm-cfg-model').value = el.dataset.m; dd.remove(); }));
+        };
+        render(); dd.querySelector('.pm-model-search').addEventListener('input', function () { render(this.value); }); dd.querySelector('.pm-model-search').focus();
+        setTimeout(() => { const closer = (e) => { if (!dd.contains(e.target) && e.target.id !== 'pm-model-arrow') { dd.remove(); document.removeEventListener('click', closer, true); } }; document.addEventListener('click', closer, true); }, 0);
+    };
 
-    // ── 群聊创建/编辑弹窗 ──
-    window.__pmShowGroupCreate=(existingKey)=>{
+    function makeOverlay(html) {
         document.getElementById('pm-overlay')?.remove();
-        loadGroups();
-        const id=getStorageId();
-        const grpData=existingKey&&window.__pmGroups[id]?.[existingKey]||null;
-        const isEdit=!!grpData;
-        const initName=grpData?.name||'';
-        const initMembers=grpData?.members?.join(' / ')||'';
-        const max=MAX_GROUP_MEMBERS-1;
+        const ov = document.createElement('div'); ov.id = 'pm-overlay';
+        if (POPOVER_SUPPORTED) ov.setAttribute('popover', 'manual');
+        ov.innerHTML = html;
+        ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+        document.body.appendChild(ov);
+        if (ov.showPopover) try { ov.showPopover(); } catch {}
+        return ov;
+    }
 
+    // ── 群聊创建/编辑 ──
+    function showGroupForm(mode, existingName, existingMembers) {
+        document.getElementById('pm-overlay')?.remove();
+        const title = mode === 'create' ? '新建群聊' : '编辑群聊';
+        const initName = existingName || '';
+        const initMembers = (existingMembers || []).join(' / ');
         makeOverlay(`
 <div class="pm-modal">
-  <div class="pm-modal-header"><b>${isEdit?'编辑群聊':'新建群聊'}</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
+  <div class="pm-modal-header"><b>${title}</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
   <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
     <div class="pm-cfg-label">群聊名称</div>
-    <input id="pm-grp-name" class="pm-cfg-input" placeholder="给群聊取个名字..." value="${escapeAttr(initName)}">
-    <div class="pm-cfg-label">群聊成员（用 / 分隔）</div>
-    <input id="pm-grp-members" class="pm-cfg-input" placeholder="角色A / 角色B / 角色C" value="${escapeAttr(initMembers)}" oninput="window.__pmGrpInputChanged()">
-    <div id="pm-grp-counter" class="pm-cfg-tip" style="text-align:left;font-weight:600;">0/${max}</div>
-    <div id="pm-grp-preview" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+    <input id="pm-group-name-input" class="pm-cfg-input" placeholder="给群聊起个名字" value="${escapeAttr(initName)}" maxlength="30">
+    <div class="pm-cfg-label" style="margin-top:4px;">成员（用 / 分隔）</div>
+    <input id="pm-group-input" class="pm-cfg-input" placeholder="角色A / 角色B / 角色C" oninput="window.__pmGroupInputChanged()" value="${escapeAttr(initMembers)}">
+    <div id="pm-group-counter" class="pm-cfg-tip" style="text-align:left;font-weight:600;">0/${MAX_GROUP_MEMBERS - 1} 个角色</div>
+    <div id="pm-group-preview" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
   </div>
   <div class="pm-modal-add">
-    <button onclick="window.__pmSaveGroup('${escapeAttr(existingKey||'')}')" style="flex:1;background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">${isEdit?'保存修改':'创建群聊'}</button>
+    <button onclick="window.__pmConfirmGroup('${mode}','${escapeAttr(existingName || '')}')" style="flex:1;background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">${mode === 'create' ? '创建' : '保存'}</button>
   </div>
 </div>`);
-        // 初始化计数
-        setTimeout(()=>window.__pmGrpInputChanged(),50);
+        setTimeout(() => window.__pmGroupInputChanged(), 0);
+    }
+
+    window.__pmShowGroupCreate = () => showGroupForm('create');
+
+    window.__pmGroupInputChanged = () => {
+        const input = document.getElementById('pm-group-input');
+        const counter = document.getElementById('pm-group-counter');
+        const preview = document.getElementById('pm-group-preview');
+        if (!input) return;
+        const names = input.value.split(/[/／]/).map(s => s.trim()).filter(Boolean);
+        const max = MAX_GROUP_MEMBERS - 1;
+        const count = Math.min(names.length, max);
+        const over = names.length > max;
+        counter.textContent = `${count}/${max} 个角色${over ? ' ⚠️ 超出上限' : ''}`;
+        counter.style.color = over ? '#ff3b30' : '#b87a00';
+        preview.innerHTML = names.slice(0, max).map((n, i) => {
+            const gc = GROUP_COLORS[i % GROUP_COLORS.length];
+            return `<span style="background:${gc.bg};color:${gc.text};padding:3px 8px;border-radius:10px;font-size:11px;">${escapeHtml(n)}</span>`;
+        }).join('');
     };
 
-    window.__pmGrpInputChanged=()=>{
-        const input=document.getElementById('pm-grp-members');
-        const counter=document.getElementById('pm-grp-counter');
-        const preview=document.getElementById('pm-grp-preview');
-        if(!input)return;
-        const names=input.value.split(/[/／]/).map(s=>s.trim()).filter(Boolean);
-        const max=MAX_GROUP_MEMBERS-1,count=Math.min(names.length,max),over=names.length>max;
-        counter.textContent=`${count}/${max} 个角色${over?' ⚠️ 超出上限':''}`;
-        counter.style.color=over?'#ff3b30':'#b87a00';
-        preview.innerHTML=names.slice(0,max).map((n,i)=>{const gc=GROUP_COLORS[i%GROUP_COLORS.length];return`<span style="background:${gc.bg};color:${gc.text};padding:3px 8px;border-radius:10px;font-size:11px;">${escapeHtml(n)}</span>`;}).join('');
-    };
-
-    window.__pmSaveGroup=(existingKey)=>{
-        const nameInput=document.getElementById('pm-grp-name');
-        const membersInput=document.getElementById('pm-grp-members');
-        if(!nameInput||!membersInput)return;
-        const gName=nameInput.value.trim()||'群聊';
-        const members=membersInput.value.split(/[/／]/).map(s=>s.trim()).filter(Boolean).slice(0,MAX_GROUP_MEMBERS-1);
-        if(members.length<2){alert('至少需要 2 个角色');return;}
-        const id=getStorageId();
-        if(!window.__pmGroups[id])window.__pmGroups[id]={};
-        const storageKey=existingKey||('👥'+gName);
-
-        // 如果改了名，需要迁移历史
-        if(existingKey&&existingKey!==('👥'+gName)){
-            if(window.__pmHistories[id]?.[existingKey]){
-                window.__pmHistories[id]['👥'+gName]=window.__pmHistories[id][existingKey];
-                delete window.__pmHistories[id][existingKey];
-                try{localStorage.setItem('ST_SMS_DATA_V2',JSON.stringify(window.__pmHistories));}catch{}
-            }
-            delete window.__pmGroups[id][existingKey];
-        }
-
-        window.__pmGroups[id]['👥'+gName]={name:gName,members};
-        saveGroups();
+    window.__pmConfirmGroup = (mode, oldName) => {
+        const nameInput = document.getElementById('pm-group-name-input');
+        const memInput = document.getElementById('pm-group-input');
+        if (!nameInput || !memInput) return;
+        const groupName = nameInput.value.trim();
+        const names = memInput.value.split(/[/／]/).map(s => s.trim()).filter(Boolean).slice(0, MAX_GROUP_MEMBERS - 1);
+        if (!groupName) { alert('请输入群聊名称'); return; }
+        if (names.length < 2) { alert('至少需要 2 个角色'); return; }
         document.getElementById('pm-overlay')?.remove();
 
-        isGroupChat=true;groupMembers=members;groupDisplayName=gName;
-        groupColorMap={};members.forEach((n,i)=>{groupColorMap[n]=GROUP_COLORS[i%GROUP_COLORS.length];});
-        window.__pmSwitch('👥'+gName);
+        const id = getStorageId();
+        if (!window.__pmGroupMeta[id]) window.__pmGroupMeta[id] = {};
+
+        if (mode === 'create') {
+            const groupKey = `__group_${Date.now()}`;
+            window.__pmGroupMeta[id][groupKey] = { name: groupName, members: names };
+            saveGroupMeta();
+            isGroupChat = true; groupMembers = names; groupDisplayName = groupName; currentGroupKey = groupKey;
+            groupColorMap = {}; names.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
+            window.__pmSwitch(groupKey);
+        } else {
+            // 编辑当前群聊
+            if (!currentGroupKey) return;
+            window.__pmGroupMeta[id][currentGroupKey] = { name: groupName, members: names };
+            saveGroupMeta();
+            groupMembers = names; groupDisplayName = groupName;
+            groupColorMap = {}; names.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
+            phoneWindow.querySelector('.pm-name').textContent = groupName;
+            fitNameFont();
+            // 重新渲染当前消息列表的角色色（重新打开同一群聊）
+            window.__pmSwitch(currentGroupKey);
+        }
     };
 
-    // ── 设置弹窗 ──
-    window.__pmShowConfig=()=>{
-        loadProfiles();loadTheme();loadBgSettings();
-        const cfg=window.__pmConfig,t=window.__pmTheme;
-        const su=(u)=>(u||'').replace(/^https?:\/\//,'').replace(/\/+$/,'');
-        const mk=(k)=>!k?'':(k.length<=8?'****':k.slice(0,4)+'****'+k.slice(-4));
-        const profH=window.__pmProfiles.length>0?window.__pmProfiles.map((p,i)=>`<div class="pm-prof-li"><div class="pm-prof-info" onclick="window.__pmPickProfile(${i})"><div class="pm-prof-url">${escapeHtml(su(p.apiUrl))}</div><div class="pm-prof-meta">${escapeHtml(mk(p.apiKey))}${p.model?' · '+escapeHtml(p.model):''}</div></div><i class="pm-prof-del" onclick="window.__pmDeleteProfile(${i})">✕</i></div>`).join(''):'<div class="pm-prof-empty">暂无档案</div>';
-        const useI=!!cfg.useIndependent;
-        const preB=Object.entries(THEME_PRESETS).map(([k,v])=>`<div class="pm-theme-chip ${t.preset===k?'pm-theme-active':''}" data-preset="${k}" onclick="window.__pmSetPreset('${k}')"><span class="pm-theme-dot" style="background:${v.right}"></span>${v.label}</div>`).join('');
-        const layB=['standard','relaxed'].map(v=>`<div class="pm-layout-chip ${t.layout===v?'pm-layout-active':''}" onclick="window.__pmSetLayout('${v}')">${v==='standard'?'标准':'宽松'}</div>`).join('');
-        const sid=getStorageId(),lk=`${sid}_${currentPersona}`;
-        const hasG=!!window.__pmBgGlobal,hasL=!!window.__pmBgLocal[lk];
+    window.__pmEditGroup = () => {
+        if (!isGroupChat) return;
+        showGroupForm('edit', groupDisplayName, groupMembers);
+    };
 
-        // 背景图状态：互斥按钮
-        const gBtns=hasG
-            ?`<button class="pm-bg-btn pm-bg-del" onclick="window.__pmClearBg('global')">清除</button>`
-            :`<label class="pm-bg-btn">选择图片<input type="file" accept="image/*" onchange="window.__pmUploadBg(this,'global')" hidden></label><button class="pm-bg-btn" onclick="window.__pmBgUrl('global')">URL</button>`;
-        const lBtns=hasL
-            ?`<button class="pm-bg-btn pm-bg-del" onclick="window.__pmClearBg('local')">清除</button>`
-            :`<label class="pm-bg-btn">选择图片<input type="file" accept="image/*" onchange="window.__pmUploadBg(this,'local')" hidden></label><button class="pm-bg-btn" onclick="window.__pmBgUrl('local')">URL</button>`;
+    // ── 设置弹窗（API/外观分页） ──
+    window.__pmShowConfig = () => {
+        loadProfiles(); loadTheme(); loadBgSettings();
+        const cfg = window.__pmConfig, t = window.__pmTheme;
+        const shortUrl = (u) => (u || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+        const maskKey = (k) => !k ? '' : (k.length <= 8 ? '****' : k.slice(0, 4) + '****' + k.slice(-4));
+        const profilesHtml = window.__pmProfiles.length > 0
+            ? window.__pmProfiles.map((p, i) => `<div class="pm-prof-li"><div class="pm-prof-info" onclick="window.__pmPickProfile(${i})"><div class="pm-prof-url">${escapeHtml(shortUrl(p.apiUrl))}</div><div class="pm-prof-meta">${escapeHtml(maskKey(p.apiKey))}${p.model ? ' · ' + escapeHtml(p.model) : ''}</div></div><i class="pm-prof-del" onclick="window.__pmDeleteProfile(${i})">✕</i></div>`).join('')
+            : '<div class="pm-prof-empty">暂无档案</div>';
+        const useIndep = !!cfg.useIndependent;
+        const presetBtns = Object.entries(THEME_PRESETS).map(([k, v]) =>
+            `<div class="pm-theme-chip ${t.preset === k ? 'pm-theme-active' : ''}" data-preset="${k}" onclick="window.__pmSetPreset('${k}')"><span class="pm-theme-dot" style="background:${v.right}"></span>${v.label}</div>`
+        ).join('');
+        const layoutBtns = ['standard', 'relaxed'].map(v =>
+            `<div class="pm-layout-chip ${t.layout === v ? 'pm-layout-active' : ''}" onclick="window.__pmSetLayout('${v}')">${v === 'standard' ? '标准' : '宽松'}</div>`
+        ).join('');
+        const id = getStorageId(), localKey = `${id}_${currentPersona}`;
+        const hasGlobalBg = !!window.__pmBgGlobal, hasLocalBg = !!window.__pmBgLocal[localKey];
+
+        // 🔧 互斥按钮：选了图就禁用 URL，反之亦然
+        const globalBgBtn = hasGlobalBg
+            ? `<button class="pm-bg-btn pm-bg-del" onclick="window.__pmClearBg('global')">清除</button>`
+            : `<label class="pm-bg-btn">选择图片<input type="file" accept="image/*" onchange="window.__pmUploadBg(this,'global')" hidden></label>
+               <button class="pm-bg-btn" onclick="window.__pmBgUrl('global')">URL</button>`;
+        const localBgBtn = hasLocalBg
+            ? `<button class="pm-bg-btn pm-bg-del" onclick="window.__pmClearBg('local')">清除</button>`
+            : `<label class="pm-bg-btn">选择图片<input type="file" accept="image/*" onchange="window.__pmUploadBg(this,'local')" hidden></label>
+               <button class="pm-bg-btn" onclick="window.__pmBgUrl('local')">URL</button>`;
 
         makeOverlay(`
 <div class="pm-modal pm-modal-wide">
@@ -433,209 +837,391 @@
     <div id="pm-tab-api" class="pm-tab-pane">
       <div style="padding:12px 14px 6px;">
         <div class="pm-cfg-label" style="margin-bottom:6px;">⚡ API 模式</div>
-        <div class="pm-mode-switch"><div id="pm-mode-main" class="pm-mode-opt ${!useI?'pm-mode-active':''}" onclick="window.__pmSetMode(false)">🏠 主API</div><div id="pm-mode-indep" class="pm-mode-opt ${useI?'pm-mode-active':''}" onclick="window.__pmSetMode(true)">🔌 独立API</div></div>
-        <div id="pm-mode-tip" class="pm-cfg-tip" style="text-align:left;padding:6px 2px 0;">${useI?'🔌 独立API':'🏠 主API'}</div>
+        <div class="pm-mode-switch">
+          <div id="pm-mode-main" class="pm-mode-opt ${!useIndep ? 'pm-mode-active' : ''}" onclick="window.__pmSetMode(false)">🏠 主API</div>
+          <div id="pm-mode-indep" class="pm-mode-opt ${useIndep ? 'pm-mode-active' : ''}" onclick="window.__pmSetMode(true)">🔌 独立API</div>
+        </div>
+        <div id="pm-mode-tip" class="pm-cfg-tip" style="text-align:left;padding:6px 2px 0;">${useIndep ? '🔌 独立API' : '🏠 主API'}</div>
       </div>
-      <div style="padding:6px 14px 4px;border-top:1px solid #f0f0f0;"><div class="pm-cfg-label" style="margin:8px 0 6px;">📚 已保存档案</div><div class="pm-prof-list">${profH}</div></div>
+      <div style="padding:6px 14px 4px;border-top:1px solid #f0f0f0;">
+        <div class="pm-cfg-label" style="margin:8px 0 6px;">📚 已保存档案</div>
+        <div class="pm-prof-list">${profilesHtml}</div>
+      </div>
       <div style="padding:10px 16px;display:flex;flex-direction:column;gap:10px;border-top:1px solid #f0f0f0;">
-        <div class="pm-cfg-label">API 地址</div><input id="pm-cfg-url" class="pm-cfg-input" placeholder="https://..." value="${escapeAttr(cfg.apiUrl||'')}">
-        <div class="pm-cfg-label">API Key</div><input id="pm-cfg-key" class="pm-cfg-input" placeholder="sk-..." value="${escapeAttr(cfg.apiKey||'')}" maxlength="999">
-        <div class="pm-cfg-label">模型名称</div><div class="pm-model-row"><input id="pm-cfg-model" class="pm-cfg-input" placeholder="手动输入或▼" value="${escapeAttr(cfg.model||'')}"><button id="pm-model-arrow" type="button" onclick="window.__pmShowModelPicker()">▼</button></div>
+        <div class="pm-cfg-label">API 地址</div>
+        <input id="pm-cfg-url" class="pm-cfg-input" placeholder="https://api.xxx.com 或 .../v1" value="${escapeAttr(cfg.apiUrl || '')}">
+        <div class="pm-cfg-label">API Key</div>
+        <input id="pm-cfg-key" class="pm-cfg-input" placeholder="sk-..." value="${escapeAttr(cfg.apiKey || '')}" maxlength="999">
+        <div class="pm-cfg-label">模型名称</div>
+        <div class="pm-model-row">
+          <input id="pm-cfg-model" class="pm-cfg-input" placeholder="手动输入或 ▼" value="${escapeAttr(cfg.model || '')}">
+          <button id="pm-model-arrow" type="button" onclick="window.__pmShowModelPicker()">▼</button>
+        </div>
         <div id="pm-api-status" class="pm-cfg-tip" style="font-weight:bold;">连接成功后自动保存</div>
       </div>
     </div>
     <div id="pm-tab-look" class="pm-tab-pane" style="display:none;">
-      <div style="padding:10px 16px;"><div class="pm-cfg-label" style="margin-bottom:8px;">📐 界面布局</div><div class="pm-layout-row">${layB}</div></div>
-      <div style="padding:10px 16px;border-top:1px solid #f0f0f0;">
-        <div class="pm-cfg-label" style="margin-bottom:8px;">🎨 气泡主题</div>
-        <div class="pm-theme-row">${preB}</div>
-        <div class="pm-custom-color-section">
-          <div class="pm-custom-color-row"><label class="pm-cfg-label" style="margin:0;">自定义右</label><input id="pm-custom-right" type="color" value="${t.customRight||'#007aff'}" onchange="window.__pmSetCustomColor()" class="pm-color-pick"><label class="pm-cfg-label" style="margin:0;">自定义左</label><input id="pm-custom-left" type="color" value="${t.customLeft||'#e9e9eb'}" onchange="window.__pmSetCustomColor()" class="pm-color-pick"><button onclick="window.__pmClearCustomColor()" class="pm-color-clear">重置</button></div>
-          <div class="pm-custom-color-row"><label class="pm-cfg-label" style="margin:0;">边框颜色</label><input id="pm-border-color" type="color" value="${t.borderColor||'#1a1a1a'}" onchange="window.__pmSetBorderColor()" class="pm-color-pick"><button onclick="document.getElementById('pm-border-color').value='#1a1a1a';window.__pmSetBorderColor()" class="pm-color-clear">重置</button></div>
+      <div style="padding:12px 16px;">
+        <div class="pm-cfg-label" style="margin-bottom:8px;">📐 界面布局</div>
+        <div class="pm-layout-row">${layoutBtns}</div>
+      </div>
+      <div style="padding:14px 16px 12px;border-top:1px solid #f0f0f0;">
+        <div class="pm-cfg-label" style="margin-bottom:10px;">🎨 气泡主题</div>
+        <div class="pm-theme-row">${presetBtns}</div>
+        <div style="display:flex;gap:8px;margin-top:14px;align-items:center;flex-wrap:wrap;">
+          <label class="pm-cfg-label" style="margin:0;">自定义右</label>
+          <input id="pm-custom-right" type="color" value="${t.customRight || '#007aff'}" onchange="window.__pmSetCustomColor()" class="pm-color-pick">
+          <label class="pm-cfg-label" style="margin:0;">自定义左</label>
+          <input id="pm-custom-left" type="color" value="${t.customLeft || '#e9e9eb'}" onchange="window.__pmSetCustomColor()" class="pm-color-pick">
+          <button onclick="window.__pmClearCustomColor()" class="pm-color-clear">重置</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
+          <label class="pm-cfg-label" style="margin:0;">边框颜色</label>
+          <input id="pm-border-color" type="color" value="${t.borderColor || '#1a1a1a'}" onchange="window.__pmSetBorderColor()" class="pm-color-pick">
+          <button onclick="document.getElementById('pm-border-color').value='#1a1a1a';window.__pmSetBorderColor()" class="pm-color-clear">重置</button>
         </div>
       </div>
-      <div style="padding:10px 16px;border-top:1px solid #f0f0f0;">
-        <div class="pm-cfg-label" style="margin-bottom:8px;">🖼 背景图</div>
+      <div style="padding:14px 16px;border-top:1px solid #f0f0f0;">
+        <div class="pm-cfg-label" style="margin-bottom:10px;">🖼 背景图</div>
         <div style="display:flex;flex-direction:column;gap:10px;">
-          <div class="pm-bg-row"><span class="pm-bg-label">全局背景</span>${gBtns}</div>
-          <div class="pm-bg-row"><span class="pm-bg-label">本联系人</span>${lBtns}</div>
+          <div class="pm-bg-row">
+            <span class="pm-bg-label">全局背景</span>
+            ${globalBgBtn}
+            ${hasGlobalBg ? '<div class="pm-bg-preview" style="background-image:url(' + window.__pmBgGlobal.slice(0, 200) + ')"></div>' : ''}
+          </div>
+          <div class="pm-bg-row">
+            <span class="pm-bg-label">本联系人</span>
+            ${localBgBtn}
+            ${hasLocalBg ? '<div class="pm-bg-preview" style="background-image:url(' + (window.__pmBgLocal[localKey] || '').slice(0, 200) + ')"></div>' : ''}
+          </div>
         </div>
       </div>
+      <div style="height:24px;"></div>
     </div>
   </div>
-  <div id="pm-cfg-bottom-btns" class="pm-modal-add" style="display:flex;flex-direction:column;gap:6px;">
-    <div style="display:flex;gap:6px;"><button onclick="window.__pmTestApi()" style="flex:1;background:#ff9500;color:#fff;border:none;border-radius:10px;padding:9px;font-size:12px;cursor:pointer;font-weight:600;">🔗 拉取模型</button><button onclick="window.__pmTestModel()" style="flex:1;background:#5856d6;color:#fff;border:none;border-radius:10px;padding:9px;font-size:12px;cursor:pointer;font-weight:600;">🧪 测试</button></div>
+  <div class="pm-modal-add" id="pm-config-bottom" style="display:flex;flex-direction:column;gap:6px;">
+    <div style="display:flex;gap:6px;">
+      <button onclick="window.__pmTestApi()" style="flex:1;background:#ff9500;color:#fff;border:none;border-radius:10px;padding:9px;font-size:12px;cursor:pointer;font-weight:600;">🔗 拉取模型</button>
+      <button onclick="window.__pmTestModel()" style="flex:1;background:#5856d6;color:#fff;border:none;border-radius:10px;padding:9px;font-size:12px;cursor:pointer;font-weight:600;">🧪 测试</button>
+    </div>
     <button onclick="window.__pmSaveConfig()" style="background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">保存配置</button>
   </div>
 </div>`);
     };
 
-    window.__pmSwitchTab=(tab)=>{
-        document.querySelectorAll('.pm-cfg-tab').forEach(el=>el.classList.toggle('pm-cfg-tab-active',el.dataset.tab===tab));
-        document.querySelectorAll('.pm-tab-pane').forEach(el=>el.style.display='none');
-        const pane=document.getElementById(`pm-tab-${tab}`);if(pane)pane.style.display='block';
-        // 🔧 API按钮只在API页显示
-        const btns=document.getElementById('pm-cfg-bottom-btns');
-        if(btns)btns.style.display=tab==='api'?'flex':'none';
+    window.__pmSwitchTab = (tab) => {
+        document.querySelectorAll('.pm-cfg-tab').forEach(el => el.classList.toggle('pm-cfg-tab-active', el.dataset.tab === tab));
+        document.querySelectorAll('.pm-tab-pane').forEach(el => el.style.display = 'none');
+        const pane = document.getElementById(`pm-tab-${tab}`);
+        if (pane) pane.style.display = 'block';
+        // 🔧 外观页隐藏拉取/测试按钮
+        const bottom = document.getElementById('pm-config-bottom');
+        if (bottom) {
+            const apiButtons = bottom.querySelector('div[style*="display:flex;gap:6px"]');
+            if (apiButtons) apiButtons.style.display = tab === 'api' ? 'flex' : 'none';
+        }
     };
 
-    window.__pmSetPreset=(p)=>{window.__pmTheme.preset=p;window.__pmTheme.customRight='';window.__pmTheme.customLeft='';saveTheme();applyTheme();document.querySelectorAll('.pm-theme-chip').forEach(el=>el.classList.toggle('pm-theme-active',el.dataset.preset===p));};
-    window.__pmSetCustomColor=()=>{window.__pmTheme.customRight=document.getElementById('pm-custom-right')?.value||'';window.__pmTheme.customLeft=document.getElementById('pm-custom-left')?.value||'';window.__pmTheme.preset='custom';saveTheme();applyTheme();document.querySelectorAll('.pm-theme-chip').forEach(el=>el.classList.remove('pm-theme-active'));};
-    window.__pmClearCustomColor=()=>{window.__pmTheme.customRight='';window.__pmTheme.customLeft='';window.__pmTheme.preset='default';saveTheme();applyTheme();const r=document.getElementById('pm-custom-right'),l=document.getElementById('pm-custom-left');if(r)r.value='#007aff';if(l)l.value='#e9e9eb';document.querySelectorAll('.pm-theme-chip').forEach(el=>el.classList.toggle('pm-theme-active',el.dataset.preset==='default'));};
-    window.__pmSetBorderColor=()=>{window.__pmTheme.borderColor=document.getElementById('pm-border-color')?.value||'#1a1a1a';saveTheme();applyTheme();};
-    window.__pmSetLayout=(v)=>{window.__pmTheme.layout=v;saveTheme();if(phoneWindow)phoneWindow.dataset.layout=v;document.querySelectorAll('.pm-layout-chip').forEach(el=>el.classList.toggle('pm-layout-active',el.textContent===(v==='standard'?'标准':'宽松')));};
-
-    // ── 背景图回调（带裁剪） ──
-    window.__pmUploadBg=async(input,scope)=>{
-        const file=input.files?.[0];if(!file)return;
-        try{
-            // 先读取原图为 data URL
-            const rawUrl=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result);r.onerror=rej;r.readAsDataURL(file);});
-            // 弹出裁剪对话框
-            const cropped=await showCropDialog(rawUrl);
-            if(!cropped)return; // 用户取消
-            if(scope==='global'){window.__pmBgGlobal=cropped;saveBgGlobal();}
-            else{const sid=getStorageId();window.__pmBgLocal[`${sid}_${currentPersona}`]=cropped;saveBgLocal();}
-            applyBackground();
-            // 刷新到外观页
-            window.__pmShowConfig();setTimeout(()=>window.__pmSwitchTab('look'),50);
-        }catch(e){alert('图片处理失败: '+e.message);}
+    window.__pmSetPreset = (p) => {
+        window.__pmTheme.preset = p; window.__pmTheme.customRight = ''; window.__pmTheme.customLeft = '';
+        saveTheme(); applyTheme();
+        document.querySelectorAll('.pm-theme-chip').forEach(el => el.classList.toggle('pm-theme-active', el.dataset.preset === p));
     };
-    window.__pmBgUrl=(scope)=>{const url=prompt('输入图片 URL：');if(!url?.trim())return;if(scope==='global'){window.__pmBgGlobal=url.trim();saveBgGlobal();}else{const sid=getStorageId();window.__pmBgLocal[`${sid}_${currentPersona}`]=url.trim();saveBgLocal();}applyBackground();window.__pmShowConfig();setTimeout(()=>window.__pmSwitchTab('look'),50);};
-    window.__pmClearBg=(scope)=>{if(scope==='global'){window.__pmBgGlobal='';saveBgGlobal();}else{const sid=getStorageId();delete window.__pmBgLocal[`${sid}_${currentPersona}`];saveBgLocal();}applyBackground();window.__pmShowConfig();setTimeout(()=>window.__pmSwitchTab('look'),50);};
+    window.__pmSetCustomColor = () => {
+        window.__pmTheme.customRight = document.getElementById('pm-custom-right')?.value || '';
+        window.__pmTheme.customLeft = document.getElementById('pm-custom-left')?.value || '';
+        window.__pmTheme.preset = 'custom'; saveTheme(); applyTheme();
+        document.querySelectorAll('.pm-theme-chip').forEach(el => el.classList.remove('pm-theme-active'));
+    };
+    window.__pmClearCustomColor = () => {
+        window.__pmTheme.customRight = ''; window.__pmTheme.customLeft = '';
+        window.__pmTheme.preset = 'default'; saveTheme(); applyTheme();
+        const r = document.getElementById('pm-custom-right'), l = document.getElementById('pm-custom-left');
+        if (r) r.value = '#007aff'; if (l) l.value = '#e9e9eb';
+        document.querySelectorAll('.pm-theme-chip').forEach(el => el.classList.toggle('pm-theme-active', el.dataset.preset === 'default'));
+    };
+    window.__pmSetBorderColor = () => {
+        window.__pmTheme.borderColor = document.getElementById('pm-border-color')?.value || '#1a1a1a';
+        saveTheme(); applyTheme();
+    };
+    window.__pmSetLayout = (v) => {
+        window.__pmTheme.layout = v; saveTheme();
+        if (phoneWindow) phoneWindow.dataset.layout = v;
+        document.querySelectorAll('.pm-layout-chip').forEach(el => el.classList.toggle('pm-layout-active', el.textContent === (v === 'standard' ? '标准' : '宽松')));
+        fitNameFont();
+    };
 
-    window.__pmTestApi=async()=>{const u=document.getElementById('pm-cfg-url').value.trim(),k=document.getElementById('pm-cfg-key').value.trim(),m=document.getElementById('pm-cfg-model').value.trim();const s=document.getElementById('pm-api-status');if(!u){s.textContent="❌ 填写地址";s.style.color="#ff3b30";return;}s.textContent="连接中...";s.style.color="#007aff";try{const r=await fetch(normalizeApiUrls(u).modelsUrl,{method:'GET',headers:{'Authorization':`Bearer ${k}`}});if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();if(d?.data&&Array.isArray(d.data)){__pmModelList=d.data.map(x=>x.id).filter(Boolean);s.textContent=`✅ ${__pmModelList.length}个模型`;s.style.color="#34c759";}else{s.textContent="✅ 连接成功";s.style.color="#34c759";}addOrUpdateProfile({apiUrl:u,apiKey:k,model:m});}catch(e){s.textContent="❌ "+e.message;s.style.color="#ff3b30";}};
-    window.__pmTestModel=async()=>{const u=document.getElementById('pm-cfg-url').value.trim(),k=document.getElementById('pm-cfg-key').value.trim(),m=document.getElementById('pm-cfg-model').value.trim();const s=document.getElementById('pm-api-status');if(!u||!k||!m){s.textContent='❌ 填完整';s.style.color='#ff3b30';return;}s.textContent=`测试「${m}」...`;s.style.color='#007aff';const ctrl=new AbortController();const tm=setTimeout(()=>ctrl.abort(),15000);try{const r=await fetch(normalizeApiUrls(u).chatUrl,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${k}`},body:JSON.stringify({model:m,messages:[{role:'user',content:'hi'}],max_tokens:16}),signal:ctrl.signal});clearTimeout(tm);if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json(),rp=j.choices?.[0]?.message?.content;s.textContent=rp!=null?`✅ "${String(rp).slice(0,25)}"`:'⚠️ 异常';s.style.color=rp!=null?'#34c759':'#ff9500';}catch(e){clearTimeout(tm);s.textContent='❌ '+(e.name==='AbortError'?'超时':e.message);s.style.color='#ff3b30';}};
-    window.__pmSaveConfig=()=>{const apiUrl=document.getElementById('pm-cfg-url')?.value.trim()??'',apiKey=document.getElementById('pm-cfg-key')?.value.trim()??'',model=document.getElementById('pm-cfg-model')?.value.trim()??'';window.__pmConfig={apiUrl,apiKey,model,useIndependent:!!window.__pmConfig.useIndependent};try{localStorage.setItem('ST_SMS_CONFIG',JSON.stringify(window.__pmConfig));}catch{}if(apiUrl&&apiKey)addOrUpdateProfile({apiUrl,apiKey,model});document.getElementById('pm-overlay')?.remove();addNote(`已保存：${window.__pmConfig.useIndependent&&apiUrl?'独立API':'主API'}`);};
-    // ── 联系人弹窗 ──
-    window.__pmShowList=()=>{
-        const id=getStorageId(),list=Object.keys(window.__pmHistories[id]||{}),checked=window.__pmBidirectional[id]||[];
-        loadGroups();
+    // 🔧 上传图片走裁剪流程
+    window.__pmUploadBg = (input, scope) => {
+        const file = input.files?.[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            openCropper(e.target.result, (croppedDataUrl) => {
+                if (scope === 'global') { window.__pmBgGlobal = croppedDataUrl; saveBgGlobal(); }
+                else { const id = getStorageId(); window.__pmBgLocal[`${id}_${currentPersona}`] = croppedDataUrl; saveBgLocal(); }
+                applyBackground();
+                window.__pmShowConfig();
+                setTimeout(() => window.__pmSwitchTab('look'), 50);
+            });
+        };
+        reader.readAsDataURL(file);
+        input.value = '';
+    };
+
+    window.__pmBgUrl = (scope) => {
+        const url = prompt('输入图片 URL：');
+        if (!url?.trim()) return;
+        if (scope === 'global') { window.__pmBgGlobal = url.trim(); saveBgGlobal(); }
+        else { const id = getStorageId(); window.__pmBgLocal[`${id}_${currentPersona}`] = url.trim(); saveBgLocal(); }
+        applyBackground();
+        window.__pmShowConfig();
+        setTimeout(() => window.__pmSwitchTab('look'), 50);
+    };
+
+    window.__pmClearBg = (scope) => {
+        if (scope === 'global') { window.__pmBgGlobal = ''; saveBgGlobal(); }
+        else { const id = getStorageId(); delete window.__pmBgLocal[`${id}_${currentPersona}`]; saveBgLocal(); }
+        applyBackground();
+        window.__pmShowConfig();
+        setTimeout(() => window.__pmSwitchTab('look'), 50);
+    };
+
+    window.__pmTestApi = async () => {
+        const u = document.getElementById('pm-cfg-url').value.trim(), k = document.getElementById('pm-cfg-key').value.trim(), m = document.getElementById('pm-cfg-model').value.trim();
+        const s = document.getElementById('pm-api-status');
+        if (!u) { s.textContent = "❌ 填写API地址"; s.style.color = "#ff3b30"; return; }
+        s.textContent = "连接中..."; s.style.color = "#007aff";
+        try {
+            const r = await fetch(normalizeApiUrls(u).modelsUrl, { method: 'GET', headers: { 'Authorization': `Bearer ${k}` } });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const d = await r.json();
+            if (d?.data && Array.isArray(d.data)) { __pmModelList = d.data.map(x => x.id).filter(Boolean); s.textContent = `✅ ${__pmModelList.length} 个模型`; s.style.color = "#34c759"; }
+            else { s.textContent = "✅ 连接成功"; s.style.color = "#34c759"; }
+            addOrUpdateProfile({ apiUrl: u, apiKey: k, model: m });
+        } catch (e) { s.textContent = "❌ " + e.message; s.style.color = "#ff3b30"; }
+    };
+    window.__pmTestModel = async () => {
+        const u = document.getElementById('pm-cfg-url').value.trim(), k = document.getElementById('pm-cfg-key').value.trim(), m = document.getElementById('pm-cfg-model').value.trim();
+        const s = document.getElementById('pm-api-status');
+        if (!u || !k || !m) { s.textContent = '❌ 请填完整'; s.style.color = '#ff3b30'; return; }
+        s.textContent = `测试「${m}」...`; s.style.color = '#007aff';
+        const ctrl = new AbortController(); const tm = setTimeout(() => ctrl.abort(), 15000);
+        try {
+            const r = await fetch(normalizeApiUrls(u).chatUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${k}` }, body: JSON.stringify({ model: m, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }), signal: ctrl.signal });
+            clearTimeout(tm); if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const j = await r.json(), reply = j.choices?.[0]?.message?.content;
+            s.textContent = reply != null ? `✅ "${String(reply).slice(0, 25)}"` : '⚠️ 格式异常'; s.style.color = reply != null ? '#34c759' : '#ff9500';
+        } catch (e) { clearTimeout(tm); s.textContent = '❌ ' + (e.name === 'AbortError' ? '超时' : e.message); s.style.color = '#ff3b30'; }
+    };
+    window.__pmSaveConfig = () => {
+        const apiUrl = document.getElementById('pm-cfg-url')?.value.trim() ?? '', apiKey = document.getElementById('pm-cfg-key')?.value.trim() ?? '', model = document.getElementById('pm-cfg-model')?.value.trim() ?? '';
+        window.__pmConfig = { apiUrl, apiKey, model, useIndependent: !!window.__pmConfig.useIndependent };
+        try { localStorage.setItem('ST_SMS_CONFIG', JSON.stringify(window.__pmConfig)); } catch {}
+        if (apiUrl && apiKey) addOrUpdateProfile({ apiUrl, apiKey, model });
+        document.getElementById('pm-overlay')?.remove();
+        addNote(`已保存：${window.__pmConfig.useIndependent && apiUrl ? '独立API' : '主API'}`);
+    };
+    // ── 联系人弹窗（一行两按钮：新建群聊 + 添加联系人） ──
+    window.__pmShowList = () => {
+        const id = getStorageId();
+        loadGroupMeta();
+        const histories = window.__pmHistories[id] || {};
+        const groups = window.__pmGroupMeta[id] || {};
+        const checked = window.__pmBidirectional[id] || [];
+
+        // 单聊列表（排除群聊 key）
+        const singleList = Object.keys(histories).filter(k => !k.startsWith('__group_'));
+        // 群聊列表
+        const groupList = Object.entries(groups).filter(([k]) => histories[k] !== undefined || true);
+
+        const renderSingle = singleList.map(n => {
+            const isChk = checked.includes(n);
+            return `<div class="pm-li">
+                <div class="pm-custom-check pm-bi-style ${isChk ? 'is-checked' : ''}" onclick="event.stopPropagation();window.__pmToggleBidirectional('${n.replace(/'/g, "\\'")}')"></div>
+                <span onclick="window.__pmSwitchContact('${n.replace(/'/g, "\\'")}')">${escapeHtml(n)}</span>
+                <i onclick="window.__pmDel('${n.replace(/'/g, "\\'")}')">删除</i>
+            </div>`;
+        }).join('');
+
+        const renderGroups = groupList.map(([key, meta]) => {
+            return `<div class="pm-li">
+                <div class="pm-group-icon">👥</div>
+                <span onclick="window.__pmSwitchContact('${key}')">${escapeHtml(meta.name)}<span class="pm-group-sub">${escapeHtml(meta.members.join('、'))}</span></span>
+                <i onclick="window.__pmDelGroup('${key}')">删除</i>
+            </div>`;
+        }).join('');
+
+        const empty = !singleList.length && !groupList.length;
+
         makeOverlay(`
 <div class="pm-modal">
   <div class="pm-modal-header"><b>联系人</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
   <div class="pm-bi-bar"><span>🧠 勾选角色可被主楼读取短信</span><span class="pm-bi-tip">已选 ${checked.length}/${MAX_BIDIRECTIONAL}</span></div>
   <div class="pm-modal-list">
-    ${list.length>0?list.map(n=>{
-        const isChk=checked.includes(n);
-        const isGrp=n.startsWith('👥');
-        return`<div class="pm-li">
-          ${isGrp?'':'<div class="pm-custom-check pm-bi-style '+(isChk?'is-checked':'')+'" onclick="event.stopPropagation();window.__pmToggleBidirectional(\''+n.replace(/'/g,"\\'")+"')\"></div>"}
-          ${isGrp?'<span class="pm-grp-icon">👥</span>':''}
-          <span onclick="window.__pmSwitchContact('${n.replace(/'/g,"\\'")}')">${escapeHtml(n.replace(/^👥/,'').trim())}</span>
-          ${isGrp?'<i class="pm-li-edit" onclick="event.stopPropagation();window.__pmShowGroupCreate(\''+escapeAttr(n)+'\')">✏️</i>':''}
-          <i onclick="window.__pmDel('${n.replace(/'/g,"\\'")}')">删除</i>
-        </div>`;
-    }).join(''):'<div style="text-align:center;color:#999;padding:20px;font-size:13px;">暂无联系人</div>'}
+    ${empty ? '<div style="text-align:center;color:#999;padding:20px;font-size:13px;">暂无联系人</div>' : (renderGroups + renderSingle)}
   </div>
-  <div class="pm-contact-bottom">
-    <button class="pm-contact-btn pm-contact-group" onclick="window.__pmShowGroupCreate()">👥 新建群聊</button>
-    <button class="pm-contact-btn pm-contact-add" onclick="window.__pmShowAddContact()">＋ 添加联系人</button>
+  <div class="pm-modal-add" style="display:flex;gap:8px;flex-direction:column;">
+    <div style="display:flex;gap:8px;">
+      <button onclick="window.__pmShowGroupCreate()" class="pm-btn-group">👥 新建群聊</button>
+      <button onclick="window.__pmShowAddContact()" class="pm-btn-add">＋ 添加联系人</button>
+    </div>
   </div>
 </div>`);
     };
 
-    window.__pmShowAddContact=()=>{
-        const nameEl=document.querySelector('.pm-contact-bottom');
-        if(!nameEl)return;
-        // 替换底部为输入框
-        nameEl.innerHTML=`<div style="display:flex;gap:8px;width:100%;"><input id="pm-add-input" class="pm-cfg-input" placeholder="输入角色名..." style="flex:1;"><button class="pm-contact-btn pm-contact-add" onclick="window.__pmSwitchContact(document.getElementById('pm-add-input').value.trim())">开始</button></div>`;
-        setTimeout(()=>{
-            const inp=document.getElementById('pm-add-input');
-            if(inp){inp.focus();inp.addEventListener('keydown',e=>{if(e.key==='Enter')window.__pmSwitchContact(inp.value.trim());});}
-        },50);
-    };
-
-    window.__pmSwitchContact=(name)=>{
-        if(!name?.trim())return;name=name.trim();
-        loadGroups();
-        const id=getStorageId();
-        if(name.startsWith('👥')){
-            const grpData=window.__pmGroups[id]?.[name];
-            if(grpData){
-                isGroupChat=true;groupMembers=grpData.members;groupDisplayName=grpData.name;
-                groupColorMap={};grpData.members.forEach((n,i)=>{groupColorMap[n]=GROUP_COLORS[i%GROUP_COLORS.length];});
-            }else{
-                // 旧格式群聊兼容
-                const members=name.replace('👥','').trim().split('、').map(s=>s.trim()).filter(Boolean);
-                isGroupChat=true;groupMembers=members;groupDisplayName=name.replace('👥','').trim();
-                groupColorMap={};members.forEach((n,i)=>{groupColorMap[n]=GROUP_COLORS[i%GROUP_COLORS.length];});
-            }
-        }else{
-            isGroupChat=false;groupMembers=[];groupColorMap={};groupDisplayName='';
-        }
-        window.__pmSwitch(name);
-    };
-
-    window.__pmSwitch=(name)=>{
-        if(!name?.trim())return;name=name.trim();
+    window.__pmShowAddContact = () => {
         document.getElementById('pm-overlay')?.remove();
-        const id=getStorageId();currentPersona=name;
-        conversationHistory=window.__pmHistories[id]?.[name]??[];
-        if(phoneWindow){
-            // 显示名字：群聊显示自定义名或成员名
-            const displayName=isGroupChat?(groupDisplayName||name.replace('👥','').trim()):name;
-            phoneWindow.querySelector('.pm-name').textContent=displayName;
-            // 群聊编辑按钮
-            const editBtn=phoneWindow.querySelector('.pm-grp-edit-btn');
-            if(editBtn)editBtn.style.display=isGroupChat?'inline':'none';
+        makeOverlay(`
+<div class="pm-modal">
+  <div class="pm-modal-header"><b>添加联系人</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
+  <div style="padding:14px 16px;">
+    <div class="pm-cfg-label" style="margin-bottom:8px;">输入角色名</div>
+    <input id="pm-add-contact-input" class="pm-cfg-input" placeholder="角色名">
+  </div>
+  <div class="pm-modal-add">
+    <button onclick="(()=>{const v=document.getElementById('pm-add-contact-input').value.trim();if(v)window.__pmSwitchContact(v);})()" style="flex:1;background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">开始聊天</button>
+  </div>
+</div>`);
+        setTimeout(() => {
+            const input = document.getElementById('pm-add-contact-input');
+            input?.focus();
+            input?.addEventListener('keydown', e => {
+                if (e.key === 'Enter') {
+                    const v = input.value.trim(); if (v) window.__pmSwitchContact(v);
+                }
+            });
+        }, 0);
+    };
 
-            fitName();
-            const list=phoneWindow.querySelector('.pm-msg-list');list.innerHTML='';
-            if(conversationHistory.length>0){
-                addNote('历史记录');
-                conversationHistory.forEach(m=>{
-                    if(isGroupChat&&m.role==='assistant'){
-                        const lines=m.content.split('\n');
-                        for(const line of lines){
-                            const mt=line.match(/^(.{1,20})[：:]\s*(.+)$/);
-                            if(mt&&groupMembers.some(gm=>gm.toLowerCase()===mt[1].trim().toLowerCase())){
-                                const sender=groupMembers.find(gm=>gm.toLowerCase()===mt[1].trim().toLowerCase());
-                                const pr=mt[2].replace(/[\(（][^)）]+[\)\）]/g,mm=>mm.replace(/\//g,'\u0001'));
-                                pr.split(/\s*\/\s*/).map(s=>s.replace(/\u0001/g,'/').trim()).filter(Boolean).forEach(s=>addBubble(s,'left',sender));
-                            }else{
-                                const pr=line.replace(/[\(（][^)）]+[\)\）]/g,mm=>mm.replace(/\//g,'\u0001'));
-                                pr.split(/\s*\/\s*/).map(s=>s.replace(/\u0001/g,'/').trim()).filter(Boolean).forEach(s=>addBubble(s,'left'));
+    window.__pmDelGroup = (key) => {
+        const id = getStorageId();
+        if (window.__pmGroupMeta[id]) delete window.__pmGroupMeta[id][key];
+        if (window.__pmHistories[id]) delete window.__pmHistories[id][key];
+        saveGroupMeta();
+        try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+        window.__pmShowList();
+    };
+
+    window.__pmSwitchContact = (key) => {
+        if (!key?.trim()) return; key = key.trim();
+        loadGroupMeta();
+        const id = getStorageId();
+        const groupMeta = window.__pmGroupMeta[id]?.[key];
+
+        if (groupMeta) {
+            // 是群聊
+            isGroupChat = true;
+            currentGroupKey = key;
+            groupMembers = groupMeta.members.slice();
+            groupDisplayName = groupMeta.name;
+            groupColorMap = {};
+            groupMembers.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
+        } else {
+            isGroupChat = false; groupMembers = []; groupColorMap = {}; groupDisplayName = ''; currentGroupKey = '';
+        }
+        window.__pmSwitch(key);
+    };
+
+    window.__pmSwitch = (name) => {
+        if (!name?.trim()) return; name = name.trim();
+        document.getElementById('pm-overlay')?.remove();
+        const id = getStorageId();
+        currentPersona = name;
+        conversationHistory = window.__pmHistories[id]?.[name] ?? [];
+        if (phoneWindow) {
+            const nameEl = phoneWindow.querySelector('.pm-name');
+            const editBtn = phoneWindow.querySelector('.pm-name-edit');
+            if (isGroupChat) {
+                nameEl.textContent = groupDisplayName || name;
+                if (editBtn) editBtn.style.display = 'inline-flex';
+            } else {
+                nameEl.textContent = name;
+                if (editBtn) editBtn.style.display = 'none';
+            }
+            fitNameFont();
+            const list = phoneWindow.querySelector('.pm-msg-list'); list.innerHTML = '';
+            if (conversationHistory.length > 0) {
+                addNote(`历史记录`);
+                conversationHistory.forEach(m => {
+                    if (isGroupChat && m.role === 'assistant') {
+                        const lines = m.content.split('\n');
+                        for (const line of lines) {
+                            const match = line.match(/^(.{1,20})[：:]\s*(.+)$/);
+                            if (match && groupMembers.some(gm => gm.toLowerCase() === match[1].trim().toLowerCase())) {
+                                const sender = groupMembers.find(gm => gm.toLowerCase() === match[1].trim().toLowerCase());
+                                const protect = match[2].replace(/[\(（][^)）]+[\)\）]/g, mm => mm.replace(/\//g, '\u0001'));
+                                protect.split(/\s*\/\s*/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
+                                    .forEach(s => addBubble(s, 'left', sender));
+                            } else {
+                                const protect = line.replace(/[\(（][^)）]+[\)\）]/g, mm => mm.replace(/\//g, '\u0001'));
+                                protect.split(/\s*\/\s*/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
+                                    .forEach(s => addBubble(s, 'left'));
                             }
                         }
-                    }else{
-                        const pr=m.content.replace(/[\(（][^)）]+[\)\）]/g,mm=>mm.replace(/\//g,'\u0001'));
-                        pr.split(/\s*\/\s*/).map(s=>s.replace(/\u0001/g,'/').trim()).filter(Boolean).forEach(s=>addBubble(s,m.role==='user'?'right':'left'));
+                    } else {
+                        const protect = m.content.replace(/[\(（][^)）]+[\)\）]/g, mm => mm.replace(/\//g, '\u0001'));
+                        protect.split(/\s*\/\s*/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
+                            .forEach(s => addBubble(s, m.role === 'user' ? 'right' : 'left'));
                     }
                 });
                 addNote('── 以上为历史 ──');
-            }else addNote('开始对话');
+            } else addNote(`开始对话`);
             applyBackground();
         }
         applyBidirectionalInjection();
     };
 
-    window.__pmDel=(name)=>{const id=getStorageId();if(window.__pmHistories[id])delete window.__pmHistories[id][name];try{localStorage.setItem('ST_SMS_DATA_V2',JSON.stringify(window.__pmHistories));}catch{}if(window.__pmGroups[id])delete window.__pmGroups[id][name];saveGroups();const a=window.__pmBidirectional[id]||[],i=a.indexOf(name);if(i>=0){a.splice(i,1);window.__pmBidirectional[id]=a;saveBidirectional();}applyBidirectionalInjection();window.__pmShowList();};
-    window.__pmToggleMin=()=>{isMinimized=!isMinimized;phoneWindow.classList.toggle('is-min',isMinimized);phoneWindow.style.removeProperty('transform');};
-    window.__pmEnd=()=>{if(phoneWindow){try{phoneWindow.hidePopover?.();}catch{}phoneWindow.remove();}phoneWindow=null;phoneActive=false;isMinimized=false;isSelectMode=false;isGroupChat=false;groupMembers=[];groupColorMap={};groupDisplayName='';};
+    window.__pmDel = (name) => {
+        const id = getStorageId();
+        if (window.__pmHistories[id]) delete window.__pmHistories[id][name];
+        try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+        const arr = window.__pmBidirectional[id] || [], idx = arr.indexOf(name);
+        if (idx >= 0) { arr.splice(idx, 1); window.__pmBidirectional[id] = arr; saveBidirectional(); }
+        applyBidirectionalInjection(); window.__pmShowList();
+    };
 
-    function ensureVisibility(){if(!phoneWindow)return;const cs=getComputedStyle(phoneWindow);if(cs.display==='none'||cs.visibility==='hidden'||parseFloat(cs.opacity||'1')<0.1){phoneWindow.style.setProperty('display','flex','important');phoneWindow.style.setProperty('visibility','visible','important');phoneWindow.style.setProperty('opacity','1','important');}}
-    setInterval(ensureVisibility,2000);
+    window.__pmToggleMin = () => { isMinimized = !isMinimized; phoneWindow.classList.toggle('is-min', isMinimized); phoneWindow.style.removeProperty('transform'); };
+    window.__pmEnd = () => {
+        if (phoneWindow) { try { phoneWindow.hidePopover?.(); } catch {} phoneWindow.remove(); }
+        phoneWindow = null; phoneActive = false; isMinimized = false; isSelectMode = false;
+        isGroupChat = false; groupMembers = []; groupColorMap = {}; groupDisplayName = ''; currentGroupKey = '';
+    };
 
-    // ── 打开窗口 ──
-    window.__pmOpen=()=>{
-        if(phoneActive&&phoneWindow){try{phoneWindow.showPopover?.();}catch{}phoneWindow.style.display='flex';ensureVisibility();return;}
-        try{window.__pmHistories=JSON.parse(localStorage.getItem('ST_SMS_DATA_V2'))||{};}catch{}
-        try{const saved=JSON.parse(localStorage.getItem('ST_SMS_CONFIG'));window.__pmConfig=saved||{apiUrl:'',apiKey:'',model:'',useIndependent:false};if(typeof window.__pmConfig.useIndependent==='undefined')window.__pmConfig.useIndependent=!!(window.__pmConfig.apiUrl&&window.__pmConfig.apiKey);}catch{window.__pmConfig={apiUrl:'',apiKey:'',model:'',useIndependent:false};}
-        loadProfiles();loadBidirectional();loadTheme();loadBgSettings();loadGroups();migrateOldHistory();
-        const c=getCtx(),defaultChar=c?.characters?.[c.characterId]?.name??'AI';
+    function ensureVisibility() {
+        if (!phoneWindow) return;
+        const cs = getComputedStyle(phoneWindow);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.1) {
+            phoneWindow.style.setProperty('display', 'flex', 'important');
+            phoneWindow.style.setProperty('visibility', 'visible', 'important');
+            phoneWindow.style.setProperty('opacity', '1', 'important');
+        }
+    }
+    setInterval(ensureVisibility, 2000);
 
-        phoneWindow=document.createElement('div');phoneWindow.id='pm-iphone';
-        phoneWindow.dataset.layout=window.__pmTheme.layout||'standard';
-        if(POPOVER_SUPPORTED)phoneWindow.setAttribute('popover','manual');
-        phoneWindow.innerHTML=`
+    window.__pmOpen = () => {
+        if (phoneActive && phoneWindow) { try { phoneWindow.showPopover?.(); } catch {} phoneWindow.style.display = 'flex'; ensureVisibility(); return; }
+        try { window.__pmHistories = JSON.parse(localStorage.getItem('ST_SMS_DATA_V2')) || {}; } catch {}
+        try {
+            const saved = JSON.parse(localStorage.getItem('ST_SMS_CONFIG'));
+            window.__pmConfig = saved || { apiUrl: '', apiKey: '', model: '', useIndependent: false };
+            if (typeof window.__pmConfig.useIndependent === 'undefined') window.__pmConfig.useIndependent = !!(window.__pmConfig.apiUrl && window.__pmConfig.apiKey);
+        } catch { window.__pmConfig = { apiUrl: '', apiKey: '', model: '', useIndependent: false }; }
+        loadProfiles(); loadBidirectional(); loadTheme(); loadBgSettings(); loadGroupMeta(); migrateOldHistory();
+        const c = getCtx(), defaultChar = c?.characters?.[c.characterId]?.name ?? 'AI';
+
+        phoneWindow = document.createElement('div'); phoneWindow.id = 'pm-iphone';
+        phoneWindow.dataset.layout = window.__pmTheme.layout || 'standard';
+        if (POPOVER_SUPPORTED) phoneWindow.setAttribute('popover', 'manual');
+
+        // 🔧 顶部布局：用绝对定位让标题始终居中
+        phoneWindow.innerHTML = `
 <div class="pm-island"></div>
 <div class="pm-main-ui">
   <div class="pm-navbar">
-    <button onclick="window.__pmShowList()" class="pm-nav-btn" style="justify-self:start;">☰</button>
+    <button onclick="window.__pmShowList()" class="pm-nav-btn pm-nav-left-btn">☰</button>
     <div class="pm-name-wrap">
       <div class="pm-name">${escapeHtml(defaultChar)}</div>
-      <span class="pm-grp-edit-btn" style="display:none;" onclick="window.__pmShowGroupCreate(currentPersona)">✏️</span>
+      <button onclick="window.__pmEditGroup()" class="pm-name-edit" style="display:none;" title="编辑群聊">✎</button>
     </div>
     <div class="pm-nav-right">
       <button onclick="window.__pmToggleSelect()" class="pm-nav-btn pm-trash-btn">🗑</button>
@@ -643,23 +1229,31 @@
       <button onclick="window.__pmEnd()" class="pm-nav-btn" style="color:#ff3b30">✕</button>
     </div>
   </div>
-  <div class="pm-confirm-bar" style="display:none;"><span class="pm-confirm-tip">选择要删除的消息</span><button onclick="window.__pmDeleteSelected()" class="pm-confirm-btn">删除所选</button><button onclick="window.__pmToggleSelect()" class="pm-cancel-btn">取消</button></div>
+  <div class="pm-confirm-bar" style="display:none;">
+    <span class="pm-confirm-tip">选择要删除的消息</span>
+    <button onclick="window.__pmDeleteSelected()" class="pm-confirm-btn">删除所选</button>
+    <button onclick="window.__pmToggleSelect()" class="pm-cancel-btn">取消</button>
+  </div>
   <div class="pm-msg-list"></div>
-  <div class="pm-input-bar"><input class="pm-input" placeholder="iMessage"><button onclick="window.__pmSend()" class="pm-up-btn">↑</button></div>
+  <div class="pm-input-bar">
+    <input class="pm-input" placeholder="iMessage">
+    <button onclick="window.__pmSend()" class="pm-up-btn">↑</button>
+  </div>
 </div>`;
         document.body.appendChild(phoneWindow);
-        if(phoneWindow.showPopover)try{phoneWindow.showPopover();}catch{}
-        phoneActive=true;
-        phoneWindow.querySelector('.pm-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();window.__pmSend();}});
-        bindIsland(phoneWindow,phoneWindow.querySelector('.pm-island'));
-        applyTheme();isGroupChat=false;groupMembers=[];groupColorMap={};groupDisplayName='';
-        window.__pmSwitch(defaultChar);applyBidirectionalInjection();ensureVisibility();
+        if (phoneWindow.showPopover) try { phoneWindow.showPopover(); } catch {}
+        phoneActive = true;
+        phoneWindow.querySelector('.pm-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.__pmSend(); } });
+        bindIsland(phoneWindow, phoneWindow.querySelector('.pm-island'));
+        applyTheme(); isGroupChat = false; groupMembers = []; groupColorMap = {}; groupDisplayName = ''; currentGroupKey = '';
+        window.__pmSwitch(defaultChar);
+        applyBidirectionalInjection(); ensureVisibility();
     };
 
-    // ══════ CSS ══════
-    if(!document.getElementById('pm-css')){
-        const s=document.createElement('style');s.id='pm-css';
-        s.textContent=`
+    // ══════════════════════ CSS ══════════════════════
+    if (!document.getElementById('pm-css')) {
+        const s = document.createElement('style'); s.id = 'pm-css';
+        s.textContent = `
 [popover]{border:none;padding:0;background:transparent;color:inherit;margin:0;overflow:visible;}
 [popover]::backdrop{display:none;background:transparent;}
 #pm-iphone{
@@ -677,19 +1271,22 @@
 #pm-iphone *,#pm-iphone *::before,#pm-iphone *::after{box-sizing:border-box;}
 .pm-island{width:100px;height:28px;background:#1a1a1a;margin:8px auto 4px;border-radius:14px;cursor:move;flex-shrink:0;touch-action:none;}
 .pm-main-ui{flex:1 !important;display:flex !important;flex-direction:column !important;overflow:hidden;min-height:0;}
-.pm-navbar{display:grid !important;grid-template-columns:auto 1fr auto;align-items:center;padding:6px 10px;border-bottom:1px solid #f0f0f0;flex-shrink:0;}
-.pm-name-wrap{display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;overflow:hidden;}
-.pm-name{font-weight:700 !important;color:#000 !important;font-size:15px !important;text-align:center !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
-.pm-grp-edit-btn{font-size:12px;cursor:pointer;flex-shrink:0;opacity:.6;transition:opacity .15s;}
-.pm-grp-edit-btn:hover{opacity:1;}
-.pm-nav-right{display:flex;gap:4px;justify-content:flex-end;}
+/* 🔧 navbar 改为相对布局 + 标题绝对居中 */
+.pm-navbar{position:relative;display:flex !important;align-items:center;padding:6px 10px;border-bottom:1px solid #f0f0f0;flex-shrink:0;min-height:38px;}
+.pm-nav-left-btn{margin-right:auto;}
+.pm-nav-right{display:flex;gap:4px;justify-content:flex-end;margin-left:auto;}
+.pm-name-wrap{position:absolute !important;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:4px;max-width:55%;pointer-events:auto;}
+.pm-name{font-weight:700 !important;color:#000 !important;font-size:15px !important;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+.pm-name-edit{background:none !important;border:none !important;color:#888 !important;font-size:13px !important;cursor:pointer;padding:2px 4px !important;line-height:1;flex-shrink:0;}
+.pm-name-edit:hover{color:#007aff !important;}
 #pm-iphone[data-layout="relaxed"] .pm-nav-right{gap:10px;}
-#pm-iphone[data-layout="relaxed"] .pm-navbar{padding:8px 14px;}
+#pm-iphone[data-layout="relaxed"] .pm-navbar{padding:8px 14px;min-height:44px;}
 .pm-nav-btn{background:none !important;border:none !important;font-size:18px !important;cursor:pointer;color:#007aff !important;padding:3px !important;line-height:1;flex-shrink:0;}
 .pm-confirm-bar{background:#fff8f0;border-bottom:1px solid #ffe0b0;padding:7px 12px;align-items:center;gap:8px;flex-shrink:0;}
-.pm-confirm-tip{flex:1;font-size:12px;color:#888;}.pm-confirm-btn{background:#ff3b30 !important;color:#fff !important;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;}
+.pm-confirm-tip{flex:1;font-size:12px;color:#888;}
+.pm-confirm-btn{background:#ff3b30 !important;color:#fff !important;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;}
 .pm-cancel-btn{background:#f0f0f0 !important;color:#333 !important;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;}
-.pm-msg-list{flex:1 !important;overflow-y:auto !important;padding:12px !important;display:flex !important;flex-direction:column !important;gap:7px;background:#fff !important;min-height:0;background-size:cover !important;background-position:center !important;}
+.pm-msg-list{flex:1 !important;overflow-y:auto !important;padding:12px !important;display:flex !important;flex-direction:column !important;gap:7px;background:#fff !important;min-height:0;background-size:cover;background-position:center;}
 .pm-select-wrap{display:flex !important;align-items:flex-end;gap:6px;}
 .pm-custom-check{width:20px;height:20px;border-radius:50%;border:2px solid #ccc;cursor:pointer;flex-shrink:0;margin-bottom:4px;transition:all .15s;position:relative;background:#fff !important;}
 .pm-custom-check[data-checked="1"],.pm-custom-check.is-checked{border-color:#007aff;background:#007aff !important;}
@@ -719,7 +1316,9 @@
 .pm-voice-card:hover{filter:brightness(.96);}
 .pm-voice-right{background:var(--pm-r-bg);color:var(--pm-r-txt);border-bottom-right-radius:4px;flex-direction:row-reverse;}
 .pm-voice-left{background:var(--pm-l-bg);color:var(--pm-l-txt);border-bottom-left-radius:4px;}
-.pm-voice-icon{font-size:14px;flex-shrink:0;}.pm-voice-wave{flex:1;display:flex;gap:3px;align-items:center;height:16px;min-width:20px;}
+.pm-voice-group{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:18px;cursor:pointer;user-select:none;transition:filter .15s;border-bottom-left-radius:4px;}
+.pm-voice-icon{font-size:14px;flex-shrink:0;}
+.pm-voice-wave{flex:1;display:flex;gap:3px;align-items:center;height:16px;min-width:20px;}
 .pm-voice-wave i{display:inline-block;width:3px;background:currentColor;opacity:.7;border-radius:2px;animation:pm-wave 1s infinite ease-in-out;}
 .pm-voice-wave i:nth-child(1){height:8px;}.pm-voice-wave i:nth-child(2){height:14px;animation-delay:.2s;}.pm-voice-wave i:nth-child(3){height:10px;animation-delay:.4s;}
 @keyframes pm-wave{0%,100%{transform:scaleY(.5)}50%{transform:scaleY(1)}}
@@ -739,23 +1338,25 @@
 .pm-modal-header b{font-size:16px !important;color:#000 !important;}.pm-modal-close{font-size:20px;color:#999;cursor:pointer;line-height:1;}
 .pm-cfg-tabs{display:flex;border-bottom:1px solid #f0f0f0;flex-shrink:0;padding:0 14px;}
 .pm-cfg-tab{flex:1;text-align:center;padding:10px 0;font-size:13px;font-weight:600;color:#888;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;user-select:none;}
-.pm-cfg-tab:hover{color:#555;}.pm-cfg-tab-active{color:#007aff !important;border-bottom-color:#007aff !important;}
+.pm-cfg-tab:hover{color:#555;}
+.pm-cfg-tab-active{color:#007aff !important;border-bottom-color:#007aff !important;}
 .pm-tab-pane{animation:pm-fade-in .15s ease;}
 @keyframes pm-fade-in{from{opacity:0}to{opacity:1}}
 .pm-bi-bar{padding:8px 14px;background:#fff8e8;border-bottom:1px solid #ffe6a8;font-size:11px;color:#885d00;display:flex;flex-direction:column;gap:3px;}
 .pm-bi-tip{font-weight:600;color:#b87a00;}
 .pm-modal-list{overflow-y:auto;flex:1;padding:6px 8px;max-height:400px;}
-.pm-li{display:flex !important;align-items:center !important;gap:8px;padding:10px;border-radius:12px;}.pm-li:hover{background:#f5f5f5;}
-.pm-grp-icon{font-size:16px;flex-shrink:0;}
-.pm-li span{flex:1;font-size:14px !important;color:#007aff !important;font-weight:500;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pm-li{display:flex !important;align-items:center !important;gap:10px;padding:10px;border-radius:12px;}.pm-li:hover{background:#f5f5f5;}
+.pm-li > span{flex:1;font-size:14px !important;color:#007aff !important;font-weight:500;cursor:pointer;display:flex;flex-direction:column;gap:2px;min-width:0;}
+.pm-group-sub{font-size:11px !important;color:#999 !important;font-weight:400 !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pm-group-icon{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#ff9500,#ff6b00);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
 .pm-li i{font-style:normal;font-size:11px;color:#fff !important;background:#ff3b30 !important;padding:3px 9px;border-radius:8px;cursor:pointer;font-weight:600;flex-shrink:0;}
-.pm-li-edit{background:#f0f0f3 !important;color:#555 !important;font-size:13px !important;padding:3px 6px !important;border-radius:6px !important;}
-/* 联系人底部按钮 */
-.pm-contact-bottom{padding:12px 14px 16px;border-top:1px solid #f0f0f0;display:flex;gap:8px;flex-shrink:0;}
-.pm-contact-btn{flex:1;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;font-family:inherit;text-align:center;}
-.pm-contact-group{background:#ff9500 !important;color:#fff !important;}
-.pm-contact-add{background:#007aff !important;color:#fff !important;}
-.pm-modal-add{padding:12px 14px 16px;border-top:1px solid #f0f0f0;display:flex;flex-direction:column;gap:6px;flex-shrink:0;}
+.pm-modal-add{padding:12px 14px 16px;border-top:1px solid #f0f0f0;display:flex;gap:8px;flex-shrink:0;}
+.pm-modal-add input{flex:1;min-width:0;border:1px solid #ddd;border-radius:10px;padding:9px 12px;font-size:13px;outline:none;color:#000 !important;background:#fff !important;}
+.pm-modal-add button{background:#007aff !important;color:#fff !important;border:none;border-radius:10px;padding:9px 14px;font-size:13px;cursor:pointer;font-weight:600;white-space:nowrap;}
+/* 联系人弹窗一行两按钮 */
+.pm-btn-group{flex:1;background:linear-gradient(135deg,#ff9500,#ff6b00) !important;color:#fff !important;border:none !important;border-radius:10px !important;padding:11px !important;font-size:13px !important;cursor:pointer !important;font-weight:600 !important;}
+.pm-btn-add{flex:1;background:linear-gradient(135deg,#007aff,#0056b3) !important;color:#fff !important;border:none !important;border-radius:10px !important;padding:11px !important;font-size:13px !important;cursor:pointer !important;font-weight:600 !important;}
+.pm-btn-group:hover,.pm-btn-add:hover{filter:brightness(1.05);}
 .pm-cfg-label{font-size:12px;color:#888;margin-bottom:-4px;}
 .pm-cfg-input{width:100%;border:1px solid #ddd !important;border-radius:10px !important;padding:9px 12px;font-size:13px !important;outline:none;color:#000 !important;background:#fff !important;}
 .pm-cfg-tip{font-size:11px;color:#aaa;text-align:center;padding:4px 0;}
@@ -774,8 +1375,6 @@
 .pm-theme-chip{display:flex;align-items:center;gap:4px;padding:5px 10px;border-radius:16px;font-size:12px;color:#555;background:#f5f5f5;cursor:pointer;border:2px solid transparent;transition:all .15s;user-select:none;}
 .pm-theme-chip:hover{background:#eee;}.pm-theme-active{border-color:#007aff;color:#007aff;background:#f0f7ff;}
 .pm-theme-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0;}
-.pm-custom-color-section{display:flex;flex-direction:column;gap:10px;margin-top:12px;}
-.pm-custom-color-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 .pm-color-pick{width:32px;height:28px;padding:0;border:1px solid #ddd;border-radius:6px;cursor:pointer;background:none;}
 .pm-color-clear{background:none;border:1px solid #ddd;border-radius:6px;padding:3px 8px;font-size:11px;color:#888;cursor:pointer;white-space:nowrap;}.pm-color-clear:hover{background:#f0f0f0;}
 .pm-layout-row{display:flex;gap:6px;}
@@ -783,29 +1382,25 @@
 .pm-layout-chip:hover{background:#eee;}.pm-layout-active{border-color:#007aff;color:#007aff;background:#f0f7ff;}
 .pm-bg-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .pm-bg-label{font-size:12px;color:#555;font-weight:500;min-width:60px;}
-.pm-bg-btn{background:#f0f0f3;border:1px solid #ddd;border-radius:8px;padding:5px 10px;font-size:11px;color:#555;cursor:pointer;white-space:nowrap;font-family:inherit;display:inline-block;text-align:center;}
+.pm-bg-btn{background:#f0f0f3;border:1px solid #ddd;border-radius:8px;padding:5px 10px;font-size:11px;color:#555;cursor:pointer;white-space:nowrap;font-family:inherit;}
 .pm-bg-btn:hover{background:#e5e5e8;}.pm-bg-del{color:#ff3b30 !important;border-color:#ffc8c8 !important;}
+.pm-bg-preview{width:36px;height:36px;border-radius:8px;background-size:cover;background-position:center;border:1px solid #ddd;flex-shrink:0;}
 .pm-model-row{display:flex;gap:6px;}.pm-model-row .pm-cfg-input{flex:1;}
 #pm-model-arrow{background:#f0f0f3;border:1px solid #ddd;border-radius:10px;width:38px;cursor:pointer;font-size:12px;color:#555;flex-shrink:0;transition:all .15s;}
 #pm-model-arrow:hover{background:#007aff;color:#fff;border-color:#007aff;}
 .pm-model-dropdown{position:fixed;z-index:2147483647;background:#fff !important;border:1px solid #ddd !important;border-radius:12px !important;box-shadow:0 8px 24px rgba(0,0,0,.18);overflow:hidden;display:flex;flex-direction:column;min-width:200px;padding:0 !important;margin:0 !important;color:#000 !important;}
 .pm-model-search{border:none !important;border-bottom:1px solid #eee !important;padding:9px 12px !important;outline:none;font-size:13px !important;background:#fafafa !important;color:#000 !important;width:100%;}
-.pm-model-options{overflow-y:auto;max-height:${MODEL_VISIBLE_ROWS*34}px;}
+.pm-model-options{overflow-y:auto;max-height:${MODEL_VISIBLE_ROWS * 34}px;}
 .pm-model-opt{padding:8px 12px;font-size:13px;color:#333;cursor:pointer;border-bottom:1px solid #f5f5f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:34px;line-height:18px;}
 .pm-model-opt:hover{background:#f0f7ff;color:#007aff;}.pm-model-empty{padding:14px;text-align:center;font-size:12px;color:#999;}
-/* 裁剪对话框 */
-.pm-crop-overlay{position:fixed !important;inset:0 !important;margin:0 !important;width:100vw !important;height:100vh !important;background:rgba(0,0,0,.7) !important;z-index:2147483647 !important;display:flex !important;align-items:center !important;justify-content:center !important;border:none !important;padding:0 !important;}
-.pm-crop-dialog{background:#fff;border-radius:16px;padding:16px;display:flex;flex-direction:column;align-items:center;gap:12px;max-width:90vw;}
-.pm-crop-title{font-size:15px;font-weight:600;color:#000;}
-.pm-crop-container{position:relative;overflow:hidden;border-radius:12px;background:#000;touch-action:none;}
-.pm-crop-img{position:absolute;top:0;left:0;transform-origin:0 0;max-width:none !important;pointer-events:none;user-select:none;}
-.pm-crop-frame{position:absolute;top:0;left:0;border:2px dashed rgba(255,255,255,.5);border-radius:12px;pointer-events:none;}
-.pm-crop-zoom{display:flex;align-items:center;gap:12px;}
-.pm-crop-btn{background:#f0f0f3;border:1px solid #ddd;border-radius:8px;width:36px;height:36px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-.pm-crop-scale{font-size:13px;color:#555;min-width:40px;text-align:center;}
-.pm-crop-actions{display:flex;gap:8px;width:100%;}
-.pm-crop-cancel{flex:1;background:#f0f0f3;border:1px solid #ddd;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;color:#555;}
-.pm-crop-confirm{flex:1;background:#007aff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;color:#fff;}
+/* 裁剪框 */
+.pm-crop-tip{font-size:11px;color:#888;text-align:center;margin-bottom:8px;}
+.pm-crop-frame{position:relative;width:100%;background:#000;border-radius:12px;overflow:hidden;cursor:grab;user-select:none;touch-action:none;}
+.pm-crop-frame:active{cursor:grabbing;}
+.pm-crop-frame img{position:absolute;left:0;top:0;max-width:none;pointer-events:none;}
+.pm-crop-mask{position:absolute;inset:0;border:2px solid rgba(255,255,255,0.6);box-shadow:0 0 0 2000px rgba(0,0,0,0.3) inset;pointer-events:none;border-radius:8px;}
+.pm-crop-zoom{display:flex;align-items:center;gap:8px;margin-top:10px;}
+.pm-crop-zoom input[type=range]{accent-color:#007aff;}
 @media(max-width:500px),(max-height:700px){
     #pm-iphone{inset:0 !important;margin:auto !important;transform:none !important;width:min(330px,92vw) !important;height:min(560px,82vh) !important;height:min(560px,82dvh) !important;min-width:0 !important;min-height:0 !important;max-width:92vw !important;max-height:82vh !important;max-height:82dvh !important;border-width:8px !important;border-radius:36px !important;}
     #pm-iphone.is-min{inset:auto 20px 20px auto !important;margin:0 !important;transform:none !important;width:120px !important;min-width:120px !important;max-width:120px !important;height:44px !important;min-height:44px !important;max-height:44px !important;border-width:5px !important;border-radius:22px !important;}
@@ -815,13 +1410,33 @@
         document.head.appendChild(s);
     }
 
-    function registerPhoneCommand(){const ctx=getCtx();if(!ctx)return false;const cb=()=>{try{window.__pmOpen();}catch(e){console.error('[phone-mode]',e);}return'';};try{const SCP=window.SlashCommandParser||ctx.SlashCommandParser,SC=window.SlashCommand||ctx.SlashCommand;if(SCP&&SC&&typeof SCP.addCommandObject==='function'&&typeof SC.fromProps==='function'){SCP.addCommandObject(SC.fromProps({name:'phone',callback:cb,helpString:'打开短信'}));return true;}}catch{}try{if(typeof ctx.registerSlashCommand==='function'){ctx.registerSlashCommand('phone',cb,[],'打开短信',true,true);return true;}}catch{}return false;}
-    if(!registerPhoneCommand()){let t=0;const i=setInterval(()=>{t++;if(registerPhoneCommand()||t>=30)clearInterval(i);},500);}
-    document.addEventListener('keydown',e=>{if(e.key!=='Enter'||e.shiftKey)return;const ta=document.getElementById('send_textarea');if(!ta||document.activeElement!==ta)return;if(ta.value.trim()==='/phone'){e.preventDefault();e.stopImmediatePropagation();ta.value='';window.__pmOpen();}},true);
-    document.addEventListener('click',e=>{const btn=e.target.closest?.('#send_but');if(!btn)return;const ta=document.getElementById('send_textarea');if(!ta)return;if(ta.value.trim()==='/phone'){e.preventDefault();e.stopImmediatePropagation();ta.value='';window.__pmOpen();}},true);
+    function registerPhoneCommand() {
+        const ctx = getCtx(); if (!ctx) return false;
+        const cb = () => { try { window.__pmOpen(); } catch (e) { console.error('[phone-mode]', e); } return ''; };
+        try {
+            const SCP = window.SlashCommandParser || ctx.SlashCommandParser, SC = window.SlashCommand || ctx.SlashCommand;
+            if (SCP && SC && typeof SCP.addCommandObject === 'function' && typeof SC.fromProps === 'function') { SCP.addCommandObject(SC.fromProps({ name: 'phone', callback: cb, helpString: '打开短信' })); return true; }
+        } catch {}
+        try { if (typeof ctx.registerSlashCommand === 'function') { ctx.registerSlashCommand('phone', cb, [], '打开短信', true, true); return true; } } catch {}
+        return false;
+    }
+    if (!registerPhoneCommand()) { let t = 0; const i = setInterval(() => { t++; if (registerPhoneCommand() || t >= 30) clearInterval(i); }, 500); }
 
-    try{window.__pmHistories=JSON.parse(localStorage.getItem('ST_SMS_DATA_V2'))||{};}catch{}
-    loadBidirectional();loadGroups();
-    setTimeout(()=>{migrateOldHistory();applyBidirectionalInjection();},1500);
-    console.log('[phone-mode] v5.1 loaded');
+    document.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' || e.shiftKey) return;
+        const ta = document.getElementById('send_textarea');
+        if (!ta || document.activeElement !== ta) return;
+        if (ta.value.trim() === '/phone') { e.preventDefault(); e.stopImmediatePropagation(); ta.value = ''; window.__pmOpen(); }
+    }, true);
+    document.addEventListener('click', e => {
+        const btn = e.target.closest?.('#send_but'); if (!btn) return;
+        const ta = document.getElementById('send_textarea'); if (!ta) return;
+        if (ta.value.trim() === '/phone') { e.preventDefault(); e.stopImmediatePropagation(); ta.value = ''; window.__pmOpen(); }
+    }, true);
+
+    try { window.__pmHistories = JSON.parse(localStorage.getItem('ST_SMS_DATA_V2')) || {}; } catch {}
+    loadBidirectional(); loadGroupMeta();
+    setTimeout(() => { migrateOldHistory(); applyBidirectionalInjection(); }, 1500);
+
+    console.log('[phone-mode] v6.0 — center title, group edit, image crop, mutex bg buttons');
 })();
