@@ -440,7 +440,8 @@
 
     // 🔧 强化群聊解析
     function parseGroupResponse(raw) {
-        const cleaned = cleanResponse(raw);
+    // 先补全未闭合的括号
+        const cleaned = cleanResponse(fixUnclosedSpecial(raw));
         const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
         const result = [];
         const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
