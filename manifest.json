@@ -5,5 +5,5 @@
     "description": "纯前端手机短信模式",
     "author": "me",
     "js": "index.js",
-    "require_backend": false,
+    "require_backend": false
 }
