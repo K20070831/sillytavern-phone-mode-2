@@ -406,15 +406,21 @@
     
     function fixUnclosedSpecial(text) {
     if (!text) return text;
+    // 先把整段文本里所有未闭合的特殊格式括号补全
+    // 策略：找到开括号后，如果在同一行内没有闭合括号，则在行末补上
     return text.split('\n').map(line => {
-        // 这一行出现了特殊格式开头，但没有闭合括号
-        const m = line.match(/[\(（]\s*(转账|收款|图片|语音|transfer|receive|image|voice|img|pic|photo|audio|收钱|收到)\s*[+：:]/i);
-        if (m && !/[\)）]/.test(line.slice(line.indexOf(m[0])))) {
-            return line + '）';
+        let result = line;
+        // 统计这一行里开括号和闭括号的数量差
+        const opens = (line.match(/[（(]/g) || []).length;
+        const closes = (line.match(/[）)]/g) || []).length;
+        if (opens > closes) {
+            // 补足缺少的右括号
+            result = line + '）'.repeat(opens - closes);
         }
-        return line;
+        return result;
     }).join('\n');
 }
+
     function cleanResponse(raw) {
     let s = fixUnclosedSpecial(raw ?? '');
     return s
@@ -496,7 +502,7 @@
 2. 严禁输出对界面、系统、对话本身的总结或描述性文字
 3. 严禁输出类似"现在应该..."、"我已经..."、"看起来..."这类叙述性句子
 4. 特殊格式必须在同一行内完整写出且闭合：(转账+金额) (收款+金额) (图片+描述) (语音+内容)
-5. 特殊格式括号内严禁换行、编号（1. 2. 3.）、列表
+5. 特殊格式括号内严禁换行，左括号和右括号必须在同一行内闭合，例：(转账+100) ✅  (转账+100\n) ❌
 6. 每条消息内的 / 只用于分隔同一角色的多条短信
 7. 每个角色0-8句，可穿插发言，不必所有人都说话
 8. 严禁英文格式 (Voice+/Image+/Transfer+)
