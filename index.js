@@ -498,8 +498,7 @@
     }
 
     function cleanResponse(raw) {
-        let s = fixUnclosedSpecial(raw ?? '');
-        return s
+        return (raw ?? '')
             .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
             .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<reflection>[\s\S]*?<\/reflection>/gi, '')
             .replace(/<inner_thought>[\s\S]*?<\/inner_thought>/gi, '')
@@ -509,38 +508,61 @@
             .replace(/<[^>]+>/g, '').trim();
     }
 
-    function splitToSentences(str) {
-        return (str || '').split(/\s*\/\s*/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 8);
+    function splitToSentences(str, stripFn = null) {
+        return (str || '').split(/\s*\/\s*/).map(s => {
+            let t = s.trim();
+            if (stripFn) t = stripFn(t);
+            
+            // 1. 无情剿灭 AI 生成的孤儿括号和空文本
+            if (!t || t === ')' || t === '）' || t === '(' || t === '（') return '';
+            
+            // 2. 针对【每个被切分出来的气泡】独立计算并补全括号
+            const opens = (t.match(/[（(]/g) || []).length;
+            const closes = (t.match(/[）)]/g) || []).length;
+            if (opens > closes) {
+                // 如果左括号多了，立刻在这个气泡末尾补足右括号
+                t += '）'.repeat(opens - closes);
+            } else if (closes > opens && opens === 0) {
+                // 如果有孤立的右括号（比如被切断的尾巴），直接切掉它
+                t = t.replace(/^[)）]+\s*/, '').replace(/\s*[)）]+$/, '');
+            }
+            return t;
+        }).filter(Boolean).slice(0, 8);
     }
 
     function parseGroupResponse(raw) {
-        const cleaned = cleanResponse(raw);
+        let cleaned = cleanResponse(raw);
         const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
         const result = [];
         const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
         const memberMap = new Map();
         groupMembers.forEach(n => memberMap.set(normName(n), n));
         const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
+        
         const stripAllPrefix = (s) => {
             let t = (s || '').trim();
-            for (let i = 0; i < 3; i++) {
-                const m = t.match(speakerRe);
-                if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
-                else break;
-            }
             const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
-            if (outer && memberMap.has(normName(outer[1]))) t = outer[2].trim();
-            t = t.replace(/[\)）]+\s*$/, '').trim();
+            if (outer && memberMap.has(normName(outer[1]))) {
+                t = outer[2].trim();
+            } else {
+                for (let i = 0; i < 3; i++) {
+                    const m = t.match(speakerRe);
+                    if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
+                    else break;
+                }
+            }
             return t;
         };
+
         for (const line of lines) {
             const m = line.match(speakerRe);
             if (m && memberMap.has(normName(m[1]))) {
                 const name = memberMap.get(normName(m[1]));
-                const sentences = m[2].split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
+                // 巧妙使用新的智能切分器
+                const sentences = splitToSentences(m[2], stripAllPrefix);
                 if (sentences.length) result.push({ name, sentences });
             } else {
-                const sentences = line.split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
+                const sentences = splitToSentences(line, stripAllPrefix);
                 if (sentences.length) {
                     if (result.length > 0) result[result.length - 1].sentences.push(...sentences);
                     else result.push({ name: groupMembers[0] || '???', sentences });
