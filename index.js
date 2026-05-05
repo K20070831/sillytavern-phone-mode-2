@@ -3,6 +3,7 @@
 
     const SAVE_LIMIT = 60, CONTEXT_LIMIT = 20, BIDIRECTIONAL_LIMIT = 20, MAX_BIDIRECTIONAL = 5;
     const BIDIRECTIONAL_KEY = 'PHONE_SMS_MEMORY', VOICE_MAX_SEC = 60, MODEL_VISIBLE_ROWS = 4, MAX_GROUP_MEMBERS = 6;
+    const BI_INJECT_DEPTH = 1; // 🔧 从 4 改为 1，每次生成都靠近末尾重读
     const POPOVER_SUPPORTED = typeof HTMLElement !== 'undefined' && HTMLElement.prototype.hasOwnProperty('popover');
     const GROUP_COLORS = [
         { bg: '#e9e9eb', text: '#000' }, { bg: '#b8e6c8', text: '#1b4332' },
@@ -19,6 +20,7 @@
     window.__pmBgLocal = window.__pmBgLocal || {};
     window.__pmGroupMeta = window.__pmGroupMeta || {};
     let __pmModelList = [];
+    let __pmEventHooked = false;
 
     let phoneActive = false, phoneWindow = null, currentPersona = '', conversationHistory = [];
     let isGenerating = false, isMinimized = false, isSelectMode = false;
@@ -66,12 +68,17 @@
         el.style.setProperty('--pm-frost', p.frost ? '1' : '0');
     }
 
+    // 🔧 修复 #2：url() 加引号 + 转义
+    function cssUrlEscape(url) {
+        return (url || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+
     function applyBackground() {
         const msgList = phoneWindow?.querySelector('.pm-msg-list'); if (!msgList) return;
         const id = getStorageId(), localKey = `${id}_${currentPersona}`;
         const bg = window.__pmBgLocal[localKey] || window.__pmBgGlobal || '';
         if (bg) {
-            msgList.style.setProperty('background-image', `url(${bg})`, 'important');
+            msgList.style.setProperty('background-image', `url("${cssUrlEscape(bg)}")`, 'important');
             msgList.style.setProperty('background-size', 'cover', 'important');
             msgList.style.setProperty('background-position', 'center', 'important');
         } else {
@@ -254,7 +261,7 @@
         const c = getCtx(); if (!c || typeof c.setExtensionPrompt !== 'function') return;
         const id = getStorageId(), checked = window.__pmBidirectional[id] || [], histories = window.__pmHistories[id] || {};
         const groups = window.__pmGroupMeta[id] || {};
-        if (!checked.length) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, 4); } catch {} return; }
+        if (!checked.length) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, BI_INJECT_DEPTH); } catch {} return; }
         const blocks = checked.map(name => {
             const conv = (histories[name] || []).slice(-BIDIRECTIONAL_LIMIT);
             if (!conv.length) return '';
@@ -269,8 +276,23 @@
             const lines = conv.map(m => { const t = (m.content || '').replace(/\s*\/\s*/g, '。'); return m.role === 'user' ? `用户：${t}` : `${name}：${t}`; }).join('\n');
             return `【与 ${name} 的短信 — 仅 ${name} 与用户知晓】\n${lines}`;
         }).filter(Boolean).join('\n\n');
-        if (!blocks) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, 4); } catch {} return; }
-        try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, `[手机短信记忆 — 私密]\n${blocks}\n[结束]`, 1, 4); } catch {}
+        if (!blocks) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, BI_INJECT_DEPTH); } catch {} return; }
+        try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, `[手机短信记忆 — 私密]\n${blocks}\n[结束]`, 1, BI_INJECT_DEPTH); } catch {}
+    }
+
+    // 🔧 修复 #5：挂钩酒馆事件，每次生成前实时刷新
+    function hookGenerationEvent() {
+        if (__pmEventHooked) return;
+        const c = getCtx();
+        if (!c?.eventSource || !c?.event_types) return;
+        const ev = c.event_types.GENERATION_STARTED || 'generation_started';
+        try {
+            c.eventSource.on(ev, () => {
+                try { applyBidirectionalInjection(); } catch {}
+            });
+            __pmEventHooked = true;
+            console.log('[phone-mode] hooked generation event');
+        } catch (e) { console.warn('[phone-mode] hook failed', e); }
     }
 
     window.__pmToggleBidirectional = (name) => {
@@ -279,6 +301,58 @@
         else { if (arr.length >= MAX_BIDIRECTIONAL) return; arr.push(name); }
         window.__pmBidirectional[id] = arr; saveBidirectional(); applyBidirectionalInjection(); window.__pmShowList();
     };
+
+    // 🔧 修复 #3：抓取 User 人设
+    function getUserPersona() {
+    const c = getCtx();
+    if (!c) return { name: '用户', description: '' };
+    let name = c.name1 || 'User';
+    let description = '';
+
+    // 方法1（最可靠）：用酒馆自己的宏解析
+    try {
+        if (typeof c.substituteParams === 'function') {
+            const resolved = c.substituteParams('{{persona}}');
+            if (resolved && resolved !== '{{persona}}' && resolved.trim()) {
+                description = resolved.trim();
+            }
+            const resolvedName = c.substituteParams('{{user}}');
+            if (resolvedName && resolvedName !== '{{user}}' && resolvedName.trim()) {
+                name = resolvedName.trim();
+            }
+        }
+    } catch (e) { console.warn('[phone-mode] substituteParams failed', e); }
+
+    // 方法2：新版驼峰字段 powerUserSettings
+    if (!description) {
+        try {
+            const pu = c.powerUserSettings || c.power_user || window.power_user;
+            if (pu) {
+                description = pu.persona_description || pu.personaDescription || '';
+                const avatar = c.userAvatar || pu.user_avatar || pu.default_persona;
+                if (!description && avatar) {
+                    const pdMap = pu.persona_descriptions || pu.personaDescriptions;
+                    if (pdMap?.[avatar]) {
+                        const pd = pdMap[avatar];
+                        if (typeof pd === 'string') description = pd;
+                        else if (pd?.description) description = pd.description;
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    // 方法3：chatMetadata.persona
+    if (!description) {
+        try {
+            const meta = c.chatMetadata || c.chat_metadata;
+            if (meta?.persona) description = String(meta.persona);
+        } catch {}
+    }
+
+    return { name, description };
+}
+
 
     async function gatherContext() {
         const c = getCtx(), char = c?.characters?.[c.characterId] || {};
@@ -293,7 +367,17 @@
                 if (!worldBookText && wi && typeof wi === 'object') worldBookText = [wi.worldInfoBefore, wi.worldInfoAfter].filter(Boolean).join('\n');
             }
         } catch {}
-        return { cardDesc: char.description ?? '', cardPersonality: char.personality ?? '', cardScenario: char.scenario ?? '', cardFirstMes: char.first_mes ?? '', cardMesExample: char.mes_example ?? '', mainChatText, worldBookText };
+        const userPersona = getUserPersona();
+        return {
+            cardDesc: char.description ?? '',
+            cardPersonality: char.personality ?? '',
+            cardScenario: char.scenario ?? '',
+            cardFirstMes: char.first_mes ?? '',
+            cardMesExample: char.mes_example ?? '',
+            mainChatText, worldBookText,
+            userName: userPersona.name,
+            userDesc: userPersona.description,
+        };
     }
 
     function bindIsland(el, handle) {
@@ -322,7 +406,6 @@
     function escapeHtml(s) { return (s || '').replace(/</g, '<').replace(/>/g, '>'); }
     function escapeAttr(s) { return (s || '').replace(/"/g, '"').replace(/</g, '<'); }
 
-    // 🔧 颜色查找兜底
     function resolveGroupColor(name) {
         if (!name) return null;
         if (groupColorMap[name]) return groupColorMap[name];
@@ -403,26 +486,20 @@
         const txt = el.parentElement?.querySelector('.pm-voice-text');
         if (txt) txt.style.display = txt.style.display === 'none' ? 'block' : 'none';
     };
-    
+
+    // 🔧 特殊格式未闭合容错
     function fixUnclosedSpecial(text) {
-    if (!text) return text;
-    // 先把整段文本里所有未闭合的特殊格式括号补全
-    // 策略：找到开括号后，如果在同一行内没有闭合括号，则在行末补上
-    return text.split('\n').map(line => {
-        let result = line;
-        // 统计这一行里开括号和闭括号的数量差
-        const opens = (line.match(/[（(]/g) || []).length;
-        const closes = (line.match(/[）)]/g) || []).length;
-        if (opens > closes) {
-            // 补足缺少的右括号
-            result = line + '）'.repeat(opens - closes);
-        }
-        return result;
-    }).join('\n');
-}
+        if (!text) return text;
+        return text.split('\n').map(line => {
+            const m = line.match(/[\(（]\s*(转账|收款|图片|语音|transfer|receive|image|voice|img|pic|photo|audio|收钱|收到)\s*[+：:]/i);
+            if (m && !/[\)）]/.test(line.slice(line.indexOf(m[0])))) return line + '）';
+            return line;
+        }).join('\n');
+    }
 
     function cleanResponse(raw) {
-        return (raw ?? '')
+        let s = fixUnclosedSpecial(raw ?? '');
+        return s
             .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
             .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<reflection>[\s\S]*?<\/reflection>/gi, '')
             .replace(/<inner_thought>[\s\S]*?<\/inner_thought>/gi, '')
@@ -432,61 +509,38 @@
             .replace(/<[^>]+>/g, '').trim();
     }
 
-    function splitToSentences(str, stripFn = null) {
-        return (str || '').split(/\s*\/\s*/).map(s => {
-            let t = s.trim();
-            if (stripFn) t = stripFn(t);
-            
-            // 1. 无情剿灭 AI 生成的孤儿括号和空文本
-            if (!t || t === ')' || t === '）' || t === '(' || t === '（') return '';
-            
-            // 2. 针对【每个被切分出来的气泡】独立计算并补全括号
-            const opens = (t.match(/[（(]/g) || []).length;
-            const closes = (t.match(/[）)]/g) || []).length;
-            if (opens > closes) {
-                // 如果左括号多了，立刻在这个气泡末尾补足右括号
-                t += '）'.repeat(opens - closes);
-            } else if (closes > opens && opens === 0) {
-                // 如果有孤立的右括号（比如被切断的尾巴），直接切掉它
-                t = t.replace(/^[)）]+\s*/, '').replace(/\s*[)）]+$/, '');
-            }
-            return t;
-        }).filter(Boolean).slice(0, 8);
+    function splitToSentences(str) {
+        return (str || '').split(/\s*\/\s*/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 8);
     }
 
     function parseGroupResponse(raw) {
-        let cleaned = cleanResponse(raw);
+        const cleaned = cleanResponse(raw);
         const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
         const result = [];
         const normName = (s) => (s || '').trim().replace(/^[【\[\(（*「『"'\s]+|[】\]\)）*「』」"'\s]+$/g, '').trim().toLowerCase();
         const memberMap = new Map();
         groupMembers.forEach(n => memberMap.set(normName(n), n));
         const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
-        
         const stripAllPrefix = (s) => {
             let t = (s || '').trim();
-            const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
-            if (outer && memberMap.has(normName(outer[1]))) {
-                t = outer[2].trim();
-            } else {
-                for (let i = 0; i < 3; i++) {
-                    const m = t.match(speakerRe);
-                    if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
-                    else break;
-                }
+            for (let i = 0; i < 3; i++) {
+                const m = t.match(speakerRe);
+                if (m && memberMap.has(normName(m[1]))) t = m[2].trim();
+                else break;
             }
+            const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
+            if (outer && memberMap.has(normName(outer[1]))) t = outer[2].trim();
+            t = t.replace(/[\)）]+\s*$/, '').trim();
             return t;
         };
-
         for (const line of lines) {
             const m = line.match(speakerRe);
             if (m && memberMap.has(normName(m[1]))) {
                 const name = memberMap.get(normName(m[1]));
-                // 巧妙使用新的智能切分器
-                const sentences = splitToSentences(m[2], stripAllPrefix);
+                const sentences = m[2].split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
                 if (sentences.length) result.push({ name, sentences });
             } else {
-                const sentences = splitToSentences(line, stripAllPrefix);
+                const sentences = line.split(/\s*\/\s*/).map(s => stripAllPrefix(s)).filter(Boolean).slice(0, 8);
                 if (sentences.length) {
                     if (result.length > 0) result[result.length - 1].sentences.push(...sentences);
                     else result.push({ name: groupMembers[0] || '???', sentences });
@@ -499,12 +553,17 @@
         const c = getCtx();
         conversationHistory.push({ role: 'user', content: userMsg });
         const ctxData = await gatherContext();
-        const { cardDesc, cardPersonality, cardScenario, cardFirstMes, cardMesExample, mainChatText, worldBookText } = ctxData;
+        const { cardDesc, cardPersonality, cardScenario, cardFirstMes, cardMesExample, mainChatText, worldBookText, userName, userDesc } = ctxData;
 
         const smsHistoryText = conversationHistory.slice(-CONTEXT_LIMIT).map(m => {
             const clean = cleanResponse(m.content);
-            return m.role === 'user' ? `用户：${clean}` : (isGroupChat ? clean : `${currentPersona}：${clean}`);
+            return m.role === 'user' ? `${userName}：${clean}` : (isGroupChat ? clean : `${currentPersona}：${clean}`);
         }).join('\n');
+
+        const userBlock = [
+            `用户名字：${userName}`,
+            userDesc ? `用户人设：${userDesc}` : ''
+        ].filter(Boolean).join('\n');
 
         let injectedInstruction, systemPrompt;
 
@@ -515,14 +574,14 @@
 [群聊短信模式——最高优先级]
 群聊名称：${groupName}
 群聊成员：${memberList}
-你同时扮演以上所有角色与用户聊天。
+你同时扮演以上所有角色与用户（${userName}）聊天。
 
 ⚠️ 输出必须满足以下全部条件，违反即视为无效：
 1. 每一行都必须以 "角色名：" 开头（角色名必须来自：${memberList}）
 2. 严禁输出对界面、系统、对话本身的总结或描述性文字
 3. 严禁输出类似"现在应该..."、"我已经..."、"看起来..."这类叙述性句子
 4. 特殊格式必须在同一行内完整写出且闭合：(转账+金额) (收款+金额) (图片+描述) (语音+内容)
-5. 特殊格式括号内严禁换行，左括号和右括号必须在同一行内闭合，例：(转账+100) ✅  (转账+100\n) ❌
+5. 特殊格式括号内严禁换行、编号（1. 2. 3.）、列表
 6. 每条消息内的 / 只用于分隔同一角色的多条短信
 7. 每个角色0-8句，可穿插发言，不必所有人都说话
 8. 严禁英文格式 (Voice+/Image+/Transfer+)
@@ -534,13 +593,20 @@
 
 ❌ 错误示例（绝对禁止）：
 小明：(语音+内容有换行
-1. 第一点
-2. 第二点)
-小红：界面现在应该正常了，顶部标题居中显示...`;
+1. 第一点)
+小红：界面现在应该正常了...`;
+            injectedInstruction = `${groupRules}
 
-            injectedInstruction = `${groupRules}\n\n${cardScenario ? '【场景】\n' + cardScenario + '\n\n' : ''}${worldBookText ? '【世界书】\n' + worldBookText + '\n\n' : ''}群聊历史：\n${smsHistoryText}\n\n用户：${userMsg}`;
+【用户信息】
+${userBlock}
+
+${cardScenario ? '【场景】\n' + cardScenario + '\n\n' : ''}${worldBookText ? '【世界书】\n' + worldBookText + '\n\n' : ''}群聊历史：
+${smsHistoryText}
+
+${userName}：${userMsg}`;
             systemPrompt = [
-                `你同时扮演 ${memberList} 在群聊「${groupName}」中与用户对话。`,
+                `你同时扮演 ${memberList} 在群聊「${groupName}」中与用户 ${userName} 对话。`,
+                `【用户信息】\n${userBlock}`,
                 cardDesc ? `【角色设定】\n${cardDesc}` : '',
                 cardPersonality ? `【性格】\n${cardPersonality}` : '',
                 cardScenario ? `【场景】\n${cardScenario}` : '',
@@ -550,7 +616,7 @@
                 `输出格式：角色名：消息 / 消息（每个角色0-8句）`,
                 `角色名后只跟该角色的话，严禁 "(角色名：xxx)" 这种嵌套。`,
                 `角色可穿插发言，不必所有人都说话。`,
-                '特殊格式（必须中文）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)。严禁英文格式。',
+                '特殊格式（必须中文且单行闭合）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)。',
                 '禁止任何标签格式旁白选项状态栏。',
             ].filter(Boolean).join('\n\n');
         } else {
@@ -558,9 +624,28 @@
                 cardScenario ? `【场景参考】\n${cardScenario}` : '',
                 cardMesExample ? `【对话示例】\n${cardMesExample}` : '',
             ].filter(Boolean).join('\n\n');
-            injectedInstruction = `\n[短信模式指令——最高优先级]\n当前角色：${currentPersona}\n以${currentPersona}的身份用手机短信方式回复。\n${contextBlockMain ? contextBlockMain + '\n\n' : ''}规则：\n- 只输出短信文字，3到8句，每句用 / 分隔\n- 禁止旁白心理描写场景描述角色名前缀标签格式\n- 特殊格式（中文）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)\n- 严禁英文格式\n\n短信对话历史：\n${smsHistoryText}\n\n用户：${userMsg}\n${currentPersona}：`;
+            injectedInstruction = `
+[短信模式指令——最高优先级]
+当前角色：${currentPersona}
+以${currentPersona}的身份用手机短信方式回复正在与你聊天的用户 ${userName}。
+
+【用户信息】
+${userBlock}
+
+${contextBlockMain ? contextBlockMain + '\n\n' : ''}规则：
+- 只输出短信文字，3到8句，每句用 / 分隔
+- 禁止旁白心理描写场景描述角色名前缀标签格式
+- 特殊格式（中文单行闭合）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)
+- 严禁英文格式
+
+短信对话历史：
+${smsHistoryText}
+
+${userName}：${userMsg}
+${currentPersona}：`;
             systemPrompt = [
-                `你正在扮演"${currentPersona}"通过手机短信与用户聊天。`,
+                `你正在扮演"${currentPersona}"通过手机短信与用户 ${userName} 聊天。`,
+                `【用户信息】\n${userBlock}`,
                 cardDesc ? `【角色设定】\n${cardDesc}` : '',
                 cardPersonality ? `【性格】\n${cardPersonality}` : '',
                 cardScenario ? `【场景】\n${cardScenario}` : '',
@@ -568,8 +653,9 @@
                 cardMesExample ? `【对话示例】\n${cardMesExample}` : '',
                 worldBookText ? `【世界书】\n${worldBookText}` : '',
                 mainChatText ? `【主线最近对话】\n${mainChatText}` : '',
-                '', '只输出3到8句短信，每句用 / 分隔。',
-                '特殊格式（必须中文）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)。严禁英文格式。',
+                '',
+                '只输出3到8句短信，每句用 / 分隔。',
+                '特殊格式（必须中文单行闭合）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)。',
                 '禁止任何标签格式旁白选项状态栏。',
             ].filter(Boolean).join('\n\n');
         }
@@ -705,6 +791,7 @@
         }
     };
 
+    // 🔧 修复 #4：删除后立即刷新注入
     window.__pmDeleteSelected = () => {
         const list = phoneWindow?.querySelector('.pm-msg-list'); if (!list) return;
         const toDelete = new Set();
@@ -719,6 +806,7 @@
             if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
             window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
             try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+            applyBidirectionalInjection(); // 立即刷新
         }
         isSelectMode = false;
         phoneWindow?.querySelector('.pm-trash-btn')?.style.removeProperty('color');
@@ -832,7 +920,6 @@
         showGroupForm('edit', groupDisplayName, groupMembers);
     };
 
-    // ── 设置弹窗 ──
     window.__pmShowConfig = () => {
         loadProfiles(); loadTheme(); loadBgSettings();
         const cfg = window.__pmConfig, t = window.__pmTheme;
@@ -1229,6 +1316,7 @@
             if (typeof window.__pmConfig.useIndependent === 'undefined') window.__pmConfig.useIndependent = !!(window.__pmConfig.apiUrl && window.__pmConfig.apiKey);
         } catch { window.__pmConfig = { apiUrl: '', apiKey: '', model: '', useIndependent: false }; }
         loadProfiles(); loadBidirectional(); loadTheme(); loadBgSettings(); loadGroupMeta(); migrateOldHistory();
+        hookGenerationEvent(); // 🔧 挂钩事件
         const c = getCtx(), defaultChar = c?.characters?.[c.characterId]?.name ?? 'AI';
 
         phoneWindow = document.createElement('div'); phoneWindow.id = 'pm-iphone';
@@ -1322,9 +1410,10 @@
 .pm-right{align-self:flex-end !important;background:var(--pm-r-bg) !important;color:var(--pm-r-txt) !important;border-bottom-right-radius:4px !important;}
 .pm-left{align-self:flex-start !important;background:var(--pm-l-bg) !important;color:var(--pm-l-txt) !important;border-bottom-left-radius:4px !important;}
 #pm-iphone[style*="--pm-frost: 1"] .pm-right,#pm-iphone[style*="--pm-frost: 1"] .pm-left{backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);}
-.pm-group-bubble-wrap{align-self:flex-start;display:flex;flex-direction:column;gap:2px;max-width:78%;}
-.pm-group-name{font-size:11px;color:#999;padding-left:6px;font-weight:500;}
-.pm-group-bubble-wrap .pm-bubble{align-self:flex-start !important;}
+/* 🔧 修复 #1：群聊气泡宽度 */
+.pm-group-bubble-wrap{align-self:flex-start !important;display:flex !important;flex-direction:column !important;gap:2px;max-width:78% !important;width:fit-content !important;align-items:flex-start !important;}
+.pm-group-bubble-wrap .pm-bubble{max-width:none !important;width:auto !important;align-self:flex-start !important;}
+.pm-group-name{font-size:11px;color:#999;padding-left:6px;font-weight:500;white-space:nowrap;}
 .pm-typing-bubble{display:flex !important;gap:5px;align-items:center;padding:11px 15px !important;width:fit-content;}
 .pm-typing-bubble span{width:7px;height:7px;border-radius:50%;background:#999;display:inline-block;animation:pm-bounce 1.2s infinite;}
 .pm-typing-bubble span:nth-child(2){animation-delay:.2s;}.pm-typing-bubble span:nth-child(3){animation-delay:.4s;}
@@ -1458,7 +1547,7 @@
 
     try { window.__pmHistories = JSON.parse(localStorage.getItem('ST_SMS_DATA_V2')) || {}; } catch {}
     loadBidirectional(); loadGroupMeta();
-    setTimeout(() => { migrateOldHistory(); applyBidirectionalInjection(); }, 1500);
+    setTimeout(() => { migrateOldHistory(); applyBidirectionalInjection(); hookGenerationEvent(); }, 1500);
 
-    console.log('[phone-mode] v7.1');
+    console.log('[phone-mode] v8.0 五项修复');
 })();
