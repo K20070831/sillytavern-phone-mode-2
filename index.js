@@ -3,7 +3,7 @@
 
     const SAVE_LIMIT = 60, CONTEXT_LIMIT = 20, BIDIRECTIONAL_LIMIT = 20, MAX_BIDIRECTIONAL = 5;
     const BIDIRECTIONAL_KEY = 'PHONE_SMS_MEMORY', VOICE_MAX_SEC = 60, MODEL_VISIBLE_ROWS = 4, MAX_GROUP_MEMBERS = 6;
-    const BI_INJECT_DEPTH = 1; // 🔧 从 4 改为 1，每次生成都靠近末尾重读
+    const BI_INJECT_DEPTH = 2;
     const POPOVER_SUPPORTED = typeof HTMLElement !== 'undefined' && HTMLElement.prototype.hasOwnProperty('popover');
     const GROUP_COLORS = [
         { bg: '#e9e9eb', text: '#000' }, { bg: '#b8e6c8', text: '#1b4332' },
@@ -11,14 +11,93 @@
         { bg: '#f5e6b8', text: '#4a3a10' },
     ];
 
+    // ========== IndexedDB 工具 ==========
+    const PM_IDB_NAME = 'PhoneModeDB', PM_IDB_STORE = 'kv';
+    let __pmIDB = null;
+    const IDB_MARKER = '__idb__';
+
+    function pmOpenIDB() {
+        return new Promise(resolve => {
+            if (__pmIDB) return resolve(__pmIDB);
+            try {
+                const req = indexedDB.open(PM_IDB_NAME, 1);
+                req.onupgradeneeded = () => {
+                    const db = req.result;
+                    if (!db.objectStoreNames.contains(PM_IDB_STORE)) db.createObjectStore(PM_IDB_STORE);
+                };
+                req.onsuccess = () => { __pmIDB = req.result; resolve(__pmIDB); };
+                req.onerror = () => resolve(null);
+            } catch { resolve(null); }
+        });
+    }
+
+    async function pmIDBSet(key, value) {
+        const db = await pmOpenIDB(); if (!db) return false;
+        return new Promise(r => {
+            try {
+                const tx = db.transaction(PM_IDB_STORE, 'readwrite');
+                tx.objectStore(PM_IDB_STORE).put(value, key);
+                tx.oncomplete = () => r(true);
+                tx.onerror = () => r(false);
+            } catch { r(false); }
+        });
+    }
+
+    async function pmIDBGet(key) {
+        const db = await pmOpenIDB(); if (!db) return null;
+        return new Promise(r => {
+            try {
+                const tx = db.transaction(PM_IDB_STORE, 'readonly');
+                const req = tx.objectStore(PM_IDB_STORE).get(key);
+                req.onsuccess = () => r(req.result ?? null);
+                req.onerror = () => r(null);
+            } catch { r(null); }
+        });
+    }
+
+    async function pmIDBDel(key) {
+        const db = await pmOpenIDB(); if (!db) return;
+        try {
+            const tx = db.transaction(PM_IDB_STORE, 'readwrite');
+            tx.objectStore(PM_IDB_STORE).delete(key);
+        } catch {}
+    }
+
+    function pmIsBigData(v) {
+        return typeof v === 'string' && v.length > 4096 && (v.startsWith('data:') || v.startsWith('blob:'));
+    }
+
+    // ========== 短信历史双写存储 ==========
+    function saveHistories() {
+        pmIDBSet('ST_SMS_DATA_V2', window.__pmHistories).catch(() => {});
+        try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+    }
+
+    async function loadHistoriesFromIDB() {
+        try {
+            const v = await pmIDBGet('ST_SMS_DATA_V2');
+            if (!v) return;
+            const parsed = typeof v === 'string' ? JSON.parse(v) : v;
+            if (!parsed || typeof parsed !== 'object') return;
+            const lsCount = Object.keys(window.__pmHistories || {}).length;
+            const idbCount = Object.keys(parsed).length;
+            if (idbCount >= lsCount) {
+                window.__pmHistories = parsed;
+                try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(parsed)); } catch {}
+                if (idbCount > lsCount) console.log('[phone-mode] 从 IndexedDB 恢复了短信历史');
+            }
+        } catch (e) { console.warn('[phone-mode] IDB 恢复失败', e); }
+    }
+
     window.__pmHistories = window.__pmHistories || {};
     window.__pmConfig = window.__pmConfig || { apiUrl: '', apiKey: '', model: '', useIndependent: false };
     window.__pmProfiles = window.__pmProfiles || [];
     window.__pmBidirectional = window.__pmBidirectional || {};
-    window.__pmTheme = window.__pmTheme || { preset: 'default', customRight: '', customLeft: '', borderColor: '', layout: 'standard' };
+    window.__pmTheme = window.__pmTheme || { preset: 'default', customRight: '', customLeft: '', borderColor: '', layout: 'standard', darkMode: 'light' };
     window.__pmBgGlobal = window.__pmBgGlobal || '';
     window.__pmBgLocal = window.__pmBgLocal || {};
     window.__pmGroupMeta = window.__pmGroupMeta || {};
+    window.__pmPokeConfig = window.__pmPokeConfig || {};
     let __pmModelList = [];
     let __pmEventHooked = false;
 
@@ -46,12 +125,73 @@
 
     function loadTheme() { try { window.__pmTheme = { ...window.__pmTheme, ...JSON.parse(localStorage.getItem('ST_SMS_THEME')) }; } catch {} }
     function saveTheme() { try { localStorage.setItem('ST_SMS_THEME', JSON.stringify(window.__pmTheme)); } catch {} }
-    function loadBgSettings() {
-        try { window.__pmBgGlobal = localStorage.getItem('ST_SMS_BG_GLOBAL') || ''; } catch {}
-        try { window.__pmBgLocal = JSON.parse(localStorage.getItem('ST_SMS_BG_LOCAL')) || {}; } catch {}
+    function loadPokeConfig() { try { window.__pmPokeConfig = JSON.parse(localStorage.getItem('ST_SMS_POKE_CONFIG')) || {}; } catch { window.__pmPokeConfig = {}; } }
+    function savePokeConfig() { try { localStorage.setItem('ST_SMS_POKE_CONFIG', JSON.stringify(window.__pmPokeConfig)); } catch {} }
+
+    async function loadBgSettings() {
+        try {
+            const ls = localStorage.getItem('ST_SMS_BG_GLOBAL') || '';
+            if (ls === IDB_MARKER) {
+                window.__pmBgGlobal = (await pmIDBGet('ST_SMS_BG_GLOBAL')) || '';
+            } else if (pmIsBigData(ls)) {
+                window.__pmBgGlobal = ls;
+                await pmIDBSet('ST_SMS_BG_GLOBAL', ls);
+                try { localStorage.setItem('ST_SMS_BG_GLOBAL', IDB_MARKER); } catch {}
+                console.log('[phone-mode] 全局背景已迁移到 IndexedDB');
+            } else {
+                window.__pmBgGlobal = ls;
+            }
+        } catch { window.__pmBgGlobal = ''; }
+
+        try {
+            const raw = JSON.parse(localStorage.getItem('ST_SMS_BG_LOCAL')) || {};
+            const result = {};
+            let migrated = 0;
+            for (const [k, v] of Object.entries(raw)) {
+                if (v === IDB_MARKER) {
+                    result[k] = (await pmIDBGet('ST_SMS_BG_LOCAL_' + k)) || '';
+                } else if (pmIsBigData(v)) {
+                    result[k] = v;
+                    await pmIDBSet('ST_SMS_BG_LOCAL_' + k, v);
+                    raw[k] = IDB_MARKER;
+                    migrated++;
+                } else {
+                    result[k] = v;
+                }
+            }
+            if (migrated > 0) {
+                try { localStorage.setItem('ST_SMS_BG_LOCAL', JSON.stringify(raw)); } catch {}
+                console.log(`[phone-mode] 已迁移 ${migrated} 张联系人背景到 IndexedDB`);
+            }
+            window.__pmBgLocal = result;
+        } catch { window.__pmBgLocal = {}; }
     }
-    function saveBgGlobal() { try { localStorage.setItem('ST_SMS_BG_GLOBAL', window.__pmBgGlobal); } catch {} }
-    function saveBgLocal() { try { localStorage.setItem('ST_SMS_BG_LOCAL', JSON.stringify(window.__pmBgLocal)); } catch {} }
+
+    async function saveBgGlobal() {
+        const v = window.__pmBgGlobal || '';
+        if (pmIsBigData(v)) {
+            await pmIDBSet('ST_SMS_BG_GLOBAL', v);
+            try { localStorage.setItem('ST_SMS_BG_GLOBAL', IDB_MARKER); } catch {}
+        } else {
+            await pmIDBDel('ST_SMS_BG_GLOBAL');
+            try { localStorage.setItem('ST_SMS_BG_GLOBAL', v); } catch {}
+        }
+    }
+
+    async function saveBgLocal() {
+        const ptr = {};
+        for (const [k, v] of Object.entries(window.__pmBgLocal || {})) {
+            if (pmIsBigData(v)) {
+                await pmIDBSet('ST_SMS_BG_LOCAL_' + k, v);
+                ptr[k] = IDB_MARKER;
+            } else if (v) {
+                await pmIDBDel('ST_SMS_BG_LOCAL_' + k);
+                ptr[k] = v;
+            }
+        }
+        try { localStorage.setItem('ST_SMS_BG_LOCAL', JSON.stringify(ptr)); } catch {}
+    }
+
     function loadGroupMeta() { try { window.__pmGroupMeta = JSON.parse(localStorage.getItem('ST_SMS_GROUP_META')) || {}; } catch { window.__pmGroupMeta = {}; } }
     function saveGroupMeta() { try { localStorage.setItem('ST_SMS_GROUP_META', JSON.stringify(window.__pmGroupMeta)); } catch {} }
 
@@ -66,9 +206,10 @@
         el.style.setProperty('--pm-r-txt', rTxt); el.style.setProperty('--pm-l-txt', lTxt);
         el.style.setProperty('--pm-border', border);
         el.style.setProperty('--pm-frost', p.frost ? '1' : '0');
+        const darkMode = t.darkMode || 'light';
+        el.setAttribute('data-theme', darkMode);
     }
 
-    // 🔧 修复 #2：url() 加引号 + 转义
     function cssUrlEscape(url) {
         return (url || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     }
@@ -216,7 +357,7 @@
                 else newData[oldKey] = oldData[oldKey];
             }
             window.__pmHistories = newData;
-            localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(newData));
+            saveHistories();
             localStorage.setItem('ST_SMS_MIGRATED_V3', '1');
         } catch {}
     }
@@ -261,7 +402,7 @@
         const c = getCtx(); if (!c || typeof c.setExtensionPrompt !== 'function') return;
         const id = getStorageId(), checked = window.__pmBidirectional[id] || [], histories = window.__pmHistories[id] || {};
         const groups = window.__pmGroupMeta[id] || {};
-        if (!checked.length) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, BI_INJECT_DEPTH); } catch {} return; }
+        if (!checked.length) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 0, 0, false, 0); } catch {} return; }
         const blocks = checked.map(name => {
             const conv = (histories[name] || []).slice(-BIDIRECTIONAL_LIMIT);
             if (!conv.length) return '';
@@ -276,23 +417,61 @@
             const lines = conv.map(m => { const t = (m.content || '').replace(/\s*\/\s*/g, '。'); return m.role === 'user' ? `用户：${t}` : `${name}：${t}`; }).join('\n');
             return `【与 ${name} 的短信 — 仅 ${name} 与用户知晓】\n${lines}`;
         }).filter(Boolean).join('\n\n');
-        if (!blocks) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 1, BI_INJECT_DEPTH); } catch {} return; }
-        try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, `[手机短信记忆 — 私密]\n${blocks}\n[结束]`, 1, BI_INJECT_DEPTH); } catch {}
+        if (!blocks) { try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, '', 0, 0, false, 0); } catch {} return; }
+        try { c.setExtensionPrompt(BIDIRECTIONAL_KEY, `[手机短信记忆 — 私密]\n${blocks}\n[结束]`, 0, 0, false, 0); } catch {}
     }
 
-    // 🔧 修复 #5：挂钩酒馆事件，每次生成前实时刷新
+    let __pmLastChatLen = 0; // 记录主楼的聊天长度防抖
+
     function hookGenerationEvent() {
         if (__pmEventHooked) return;
         const c = getCtx();
         if (!c?.eventSource || !c?.event_types) return;
-        const ev = c.event_types.GENERATION_STARTED || 'generation_started';
+        const et = c.event_types;
+
+        __pmLastChatLen = (c.chat || []).length; // 初始化当前长度
+
+        const events = [
+            et.GENERATION_STARTED || 'generation_started',
+            et.CHAT_CHANGED || 'chat_id_changed',
+            et.SETTINGS_UPDATED || 'settings_updated',
+            et.CHATCOMPLETION_SOURCE_CHANGED || 'chatcompletion_source_changed',
+            et.OAI_PRESET_CHANGED_AFTER || 'oai_preset_changed_after',
+        ];
+        
+        events.forEach(ev => {
+            try {
+                c.eventSource.on(ev, () => {
+                    try { applyBidirectionalInjection(); } catch {}
+                });
+            } catch {}
+        });
+
+        // 👇 修复：带“长度比对”的主楼监听器，严防 Swipe 重复计数
         try {
-            c.eventSource.on(ev, () => {
-                try { applyBidirectionalInjection(); } catch {}
+            c.eventSource.on(et.MESSAGE_RECEIVED || 'message_received', () => {
+                const currentLen = (c.chat || []).length;
+                
+                if (currentLen > __pmLastChatLen) {
+                    // 只有总消息数增加了，才推进计数器
+                    __pmLastChatLen = currentLen;
+                    if (typeof window.__pmIncrementCounters === 'function') {
+                        window.__pmIncrementCounters();
+                    }
+                } else if (currentLen < __pmLastChatLen) {
+                    // 如果用户删除了主楼消息，只同步长度，不推进计数器
+                    __pmLastChatLen = currentLen;
+                }
             });
-            __pmEventHooked = true;
-            console.log('[phone-mode] hooked generation event');
-        } catch (e) { console.warn('[phone-mode] hook failed', e); }
+
+            // 切换聊天时，重置长度基准
+            c.eventSource.on(et.CHAT_CHANGED || 'chat_id_changed', () => {
+                __pmLastChatLen = (c.chat || []).length;
+            });
+        } catch {}
+
+        __pmEventHooked = true;
+        console.log('[phone-mode] hooked', events.length, 'events');
     }
 
     window.__pmToggleBidirectional = (name) => {
@@ -302,29 +481,12 @@
         window.__pmBidirectional[id] = arr; saveBidirectional(); applyBidirectionalInjection(); window.__pmShowList();
     };
 
-    // 🔧 修复 #3：抓取 User 人设
     function getUserPersona() {
-    const c = getCtx();
-    if (!c) return { name: '用户', description: '' };
-    let name = c.name1 || 'User';
-    let description = '';
+        const c = getCtx();
+        if (!c) return { name: '用户', description: '' };
+        let name = c.name1 || 'User';
+        let description = '';
 
-    // 方法1（最可靠）：用酒馆自己的宏解析
-    try {
-        if (typeof c.substituteParams === 'function') {
-            const resolved = c.substituteParams('{{persona}}');
-            if (resolved && resolved !== '{{persona}}' && resolved.trim()) {
-                description = resolved.trim();
-            }
-            const resolvedName = c.substituteParams('{{user}}');
-            if (resolvedName && resolvedName !== '{{user}}' && resolvedName.trim()) {
-                name = resolvedName.trim();
-            }
-        }
-    } catch (e) { console.warn('[phone-mode] substituteParams failed', e); }
-
-    // 方法2：新版驼峰字段 powerUserSettings
-    if (!description) {
         try {
             const pu = c.powerUserSettings || c.power_user || window.power_user;
             if (pu) {
@@ -340,19 +502,25 @@
                 }
             }
         } catch {}
-    }
 
-    // 方法3：chatMetadata.persona
-    if (!description) {
+        if (!description) {
+            try {
+                const meta = c.chatMetadata || c.chat_metadata;
+                if (meta?.persona) description = String(meta.persona);
+            } catch {}
+        }
+
         try {
-            const meta = c.chatMetadata || c.chat_metadata;
-            if (meta?.persona) description = String(meta.persona);
+            if (typeof c.substituteParams === 'function') {
+                const resolvedName = c.substituteParams('{{user}}');
+                if (resolvedName && resolvedName !== '{{user}}' && resolvedName.trim()) {
+                    name = resolvedName.trim();
+                }
+            }
         } catch {}
+
+        return { name, description };
     }
-
-    return { name, description };
-}
-
 
     async function gatherContext() {
         const c = getCtx(), char = c?.characters?.[c.characterId] || {};
@@ -403,8 +571,17 @@
         handle.addEventListener('touchstart', onStart, { passive: false }); window.addEventListener('touchmove', onMove, { passive: false }); window.addEventListener('touchend', onEnd);
     }
 
-    function escapeHtml(s) { return (s || '').replace(/</g, '<').replace(/>/g, '>'); }
-    function escapeAttr(s) { return (s || '').replace(/"/g, '"').replace(/</g, '<'); }
+    // ✅ HTML 实体编码（防 XSS，含单引号转义）
+    function escapeHtml(s) {
+        return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function escapeAttr(s) {
+        return (s || '')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/</g, '&lt;')
+            .replace(/&/g, '&amp;');
+    }
 
     function resolveGroupColor(name) {
         if (!name) return null;
@@ -464,8 +641,12 @@
                 b.innerHTML = `<div class="pm-img-card">🖼️ ${escapeHtml(m[2].trim())}</div>`;
             } else {
                 const txt = m[2].trim(), len = [...txt].length;
-                const dur = Math.min(VOICE_MAX_SEC, Math.max(1, len * 2));
-                const width = Math.min(240, Math.max(110, 90 + len * 5));
+                let dur;
+                if (len <= 5) dur = Math.max(1, len);
+                else if (len <= 15) dur = 5 + (len - 5);
+                else if (len <= 40) dur = 15 + Math.ceil((len - 15) * 0.8);
+                else dur = Math.min(VOICE_MAX_SEC, 35 + Math.ceil((len - 40) * 0.5));
+                const width = Math.min(240, Math.max(110, 90 + Math.min(len, 30) * 4));
                 let voiceStyle = `width:${width}px`, voiceClass = `pm-voice-card pm-voice-${side}`;
                 if (isGroupLeft && gc) {
                     voiceStyle = `width:${width}px;background:${gc.bg} !important;color:${gc.text} !important;`;
@@ -487,16 +668,6 @@
         if (txt) txt.style.display = txt.style.display === 'none' ? 'block' : 'none';
     };
 
-    // 🔧 特殊格式未闭合容错
-    function fixUnclosedSpecial(text) {
-        if (!text) return text;
-        return text.split('\n').map(line => {
-            const m = line.match(/[\(（]\s*(转账|收款|图片|语音|transfer|receive|image|voice|img|pic|photo|audio|收钱|收到)\s*[+：:]/i);
-            if (m && !/[\)）]/.test(line.slice(line.indexOf(m[0])))) return line + '）';
-            return line;
-        }).join('\n');
-    }
-
     function cleanResponse(raw) {
         return (raw ?? '')
             .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
@@ -509,21 +680,16 @@
     }
 
     function splitToSentences(str, stripFn = null) {
-        return (str || '').split(/\s*\/\s*/).map(s => {
-            let t = s.trim();
+        const protect = (str || '').replace(/[\(（][^)）]*[\)\）]/g, m => m.replace(/\//g, '\u0001'));
+        return protect.split(/\s*\/\s*/).map(s => {
+            let t = s.replace(/\u0001/g, '/').trim();
             if (stripFn) t = stripFn(t);
-            
-            // 1. 无情剿灭 AI 生成的孤儿括号和空文本
             if (!t || t === ')' || t === '）' || t === '(' || t === '（') return '';
-            
-            // 2. 针对【每个被切分出来的气泡】独立计算并补全括号
             const opens = (t.match(/[（(]/g) || []).length;
             const closes = (t.match(/[）)]/g) || []).length;
             if (opens > closes) {
-                // 如果左括号多了，立刻在这个气泡末尾补足右括号
                 t += '）'.repeat(opens - closes);
             } else if (closes > opens && opens === 0) {
-                // 如果有孤立的右括号（比如被切断的尾巴），直接切掉它
                 t = t.replace(/^[)）]+\s*/, '').replace(/\s*[)）]+$/, '');
             }
             return t;
@@ -538,7 +704,7 @@
         const memberMap = new Map();
         groupMembers.forEach(n => memberMap.set(normName(n), n));
         const speakerRe = /^[\s\*【\[「『"'（\(]*(.{1,20}?)[\s\*】\]」』"'）\)]*\s*[：:]\s*([\s\S]+)$/;
-        
+
         const stripAllPrefix = (s) => {
             let t = (s || '').trim();
             const outer = t.match(/^[\(（]\s*(.{1,20}?)\s*[：:]\s*([\s\S]+?)\s*[\)）]\s*$/);
@@ -558,7 +724,6 @@
             const m = line.match(speakerRe);
             if (m && memberMap.has(normName(m[1]))) {
                 const name = memberMap.get(normName(m[1]));
-                // 巧妙使用新的智能切分器
                 const sentences = splitToSentences(m[2], stripAllPrefix);
                 if (sentences.length) result.push({ name, sentences });
             } else {
@@ -571,6 +736,44 @@
         }
         return result;
     }
+
+    // ========== 统一 AI 调用（支持主API和独立API） ==========
+    async function callAI(systemPrompt, userPrompt, options = {}) {
+        const cfg = window.__pmConfig;
+        const useIndep = cfg.useIndependent && cfg.apiUrl && cfg.apiKey;
+        const maxTokens = options.maxTokens || (isGroupChat ? 600 : 300);
+
+        if (useIndep) {
+            const { chatUrl } = normalizeApiUrls(cfg.apiUrl);
+            const messages = [];
+            if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+            messages.push({ role: 'user', content: userPrompt });
+            const resp = await fetch(chatUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}` },
+                body: JSON.stringify({
+                    model: cfg.model || 'gpt-4o-mini',
+                    messages,
+                    max_tokens: maxTokens,
+                    temperature: 1.2,
+                    top_p: 0.95,
+                    frequency_penalty: 0.3,
+                    presence_penalty: 0.3,
+                })
+            });
+            if (!resp.ok) {
+                const errText = await resp.text().catch(() => '');
+                throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 120)}`);
+            }
+            const json = await resp.json();
+            return json.choices?.[0]?.message?.content ?? '';
+        } else {
+            const c = getCtx();
+            if (!c) throw new Error('无上下文');
+            return await c.generateQuietPrompt(userPrompt, false, false);
+        }
+    }
+
     async function fetchSMS(userMsg) {
         const c = getCtx();
         conversationHistory.push({ role: 'user', content: userMsg });
@@ -605,7 +808,7 @@
 4. 特殊格式必须在同一行内完整写出且闭合：(转账+金额) (收款+金额) (图片+描述) (语音+内容)
 5. 特殊格式括号内严禁换行、编号（1. 2. 3.）、列表
 6. 每条消息内的 / 只用于分隔同一角色的多条短信
-7. 每个角色0-8句，可穿插发言，不必所有人都说话
+7. 每个角色根据自己的人设和当前剧情主动决定发言条数，0-8句，可穿插发言，不必所有人都说话
 8. 严禁英文格式 (Voice+/Image+/Transfer+)
 
 ✅ 正确示例：
@@ -635,7 +838,7 @@ ${userName}：${userMsg}`;
                 worldBookText ? `【世界书】\n${worldBookText}` : '',
                 mainChatText ? `【主线最近对话】\n${mainChatText}` : '',
                 '',
-                `输出格式：角色名：消息 / 消息（每个角色0-8句）`,
+                `输出格式：角色名：消息 / 消息（每个角色0-8句，根据人设和剧情决定是否发言及发言数量）`,
                 `角色名后只跟该角色的话，严禁 "(角色名：xxx)" 这种嵌套。`,
                 `角色可穿插发言，不必所有人都说话。`,
                 '特殊格式（必须中文且单行闭合）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)。',
@@ -676,30 +879,21 @@ ${currentPersona}：`;
                 worldBookText ? `【世界书】\n${worldBookText}` : '',
                 mainChatText ? `【主线最近对话】\n${mainChatText}` : '',
                 '',
-                '只输出3到8句短信，每句用 / 分隔。',
+                '只输出3到8句短信，每句用 / 分隔，不得中途截断。',
                 '特殊格式（必须中文单行闭合）：(转账+金额) (收款+金额) (图片+描述) (语音+内容)。',
                 '禁止任何标签格式旁白选项状态栏。',
             ].filter(Boolean).join('\n\n');
         }
 
         try {
-            let raw = '';
             const cfg = window.__pmConfig;
             const useIndep = cfg.useIndependent && cfg.apiUrl && cfg.apiKey;
+            let raw = '';
+
             if (useIndep) {
-                const messages = [
-                    { role: 'system', content: systemPrompt },
-                    ...conversationHistory.slice(-CONTEXT_LIMIT).map(m => ({ role: m.role, content: cleanResponse(m.content) }))
-                ];
-                const { chatUrl } = normalizeApiUrls(cfg.apiUrl);
-                const resp = await fetch(chatUrl, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}` },
-                    body: JSON.stringify({ model: cfg.model || 'gpt-4o-mini', messages, max_tokens: isGroupChat ? 600 : 300, temperature: 0.85 })
-                });
-                const json = await resp.json();
-                raw = json.choices?.[0]?.message?.content ?? '';
+                raw = await callAI(systemPrompt, injectedInstruction, { maxTokens: isGroupChat ? 600 : 300 });
             } else {
-                raw = await c.generateQuietPrompt(injectedInstruction, false, false);
+                raw = await callAI('', injectedInstruction, { maxTokens: isGroupChat ? 600 : 300 });
             }
 
             let resultData;
@@ -725,7 +919,7 @@ ${currentPersona}：`;
             const id = getStorageId();
             if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
             window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
-            try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+            saveHistories();
             applyBidirectionalInjection();
             return resultData;
         } catch (e) {
@@ -785,110 +979,534 @@ ${currentPersona}：`;
             for (const s of result.data) { await new Promise(r => setTimeout(r, 150)); addBubble(s, 'left'); }
         }
         isGenerating = false; input.disabled = false; if (btn) btn.disabled = false; input.focus();
+
+        // 自动发消息：递增计数器
+        setTimeout(() => {
+            if (!isGenerating && typeof window.__pmIncrementCounters === 'function') {
+                window.__pmIncrementCounters();
+            }
+        }, 300);
     };
 
-    window.__pmToggleSelect = () => {
-        isSelectMode = !isSelectMode;
-        const list = phoneWindow?.querySelector('.pm-msg-list');
-        const trashBtn = phoneWindow?.querySelector('.pm-trash-btn');
-        const confirmBar = phoneWindow?.querySelector('.pm-confirm-bar');
-        if (!list) return;
-        if (isSelectMode) {
-            trashBtn.style.color = '#ff3b30'; confirmBar.style.display = 'flex';
-            list.querySelectorAll('.pm-bubble, .pm-group-bubble-wrap').forEach(b => {
-                if (b.id === 'pm-typing' || b.closest('.pm-select-wrap')) return;
-                const wrap = document.createElement('div'); wrap.className = 'pm-select-wrap';
-                const cb = document.createElement('div'); cb.className = 'pm-custom-check'; cb.dataset.checked = '0';
-                cb.onclick = () => { cb.dataset.checked = cb.dataset.checked === '0' ? '1' : '0'; };
-                b.parentNode.insertBefore(wrap, b);
-                wrap.appendChild(cb); wrap.appendChild(b);
-                wrap.dataset.side = b.dataset.side || ''; wrap.dataset.text = b.dataset.text || '';
-            });
-        } else {
-            trashBtn.style.color = ''; confirmBar.style.display = 'none';
-            list.querySelectorAll('.pm-select-wrap').forEach(wrap => {
-                const b = wrap.querySelector('.pm-bubble, .pm-group-bubble-wrap');
-                if (b) wrap.parentNode.insertBefore(b, wrap); wrap.remove();
-            });
+    
+    // ========== 全局计数器推进（支持主楼触发） ==========
+    window.__pmIncrementCounters = () => {
+        const id = getStorageId();
+        const configs = window.__pmPokeConfig[id];
+        if (!configs) return;
+
+        let updated = false;
+        const toPoke = [];
+
+        for (const [contact, config] of Object.entries(configs)) {
+            if (config?.autoPoke?.enabled) {
+                config.autoPoke.counter = (config.autoPoke.counter || 0) + 1;
+                updated = true;
+                if (config.autoPoke.counter >= config.autoPoke.interval) {
+                    config.autoPoke.counter = 0;
+                    toPoke.push(contact);
+                }
+            }
+        }
+
+        if (updated) {
+            savePokeConfig();
+            // 实时更新当前正开着的设置面板上的数字
+            const counterEl = document.getElementById('pm-poke-counter');
+            if (counterEl && configs[currentPersona]) counterEl.textContent = configs[currentPersona].autoPoke.counter;
+            const groupCounterEl = document.getElementById('pm-poke-counter-group');
+            if (groupCounterEl && currentGroupKey && configs[currentGroupKey]) groupCounterEl.textContent = configs[currentGroupKey].autoPoke.counter;
+        }
+
+        if (toPoke.length > 0) {
+            (async () => {
+                for (const contact of toPoke) { await window.__pmAutoPoke(contact); }
+            })();
         }
     };
 
-    // 🔧 修复 #4：删除后立即刷新注入
-    window.__pmDeleteSelected = () => {
-        const list = phoneWindow?.querySelector('.pm-msg-list'); if (!list) return;
-        const toDelete = new Set();
-        list.querySelectorAll('.pm-select-wrap').forEach(wrap => {
-            const cb = wrap.querySelector('.pm-custom-check');
-            if (cb?.dataset.checked === '1') { toDelete.add(wrap.dataset.text); wrap.remove(); }
-            else { const b = wrap.querySelector('.pm-bubble, .pm-group-bubble-wrap'); if (b) wrap.parentNode.insertBefore(b, wrap); wrap.remove(); }
-        });
-        if (toDelete.size > 0) {
-            conversationHistory = conversationHistory.filter(m => !m.content.split(/\s*\/\s*/).some(p => toDelete.has(p.trim())));
-            const id = getStorageId();
-            if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
-            window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
-            try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
-            applyBidirectionalInjection(); // 立即刷新
+    // ========== 自动发消息（支持纯后台运行，不乱弹气泡） ==========
+    window.__pmAutoPoke = async (contactName) => {
+        if (isGenerating) return;
+        isGenerating = true;
+
+        const id = getStorageId();
+        const groupMeta = window.__pmGroupMeta[id]?.[contactName];
+        const isGroup = !!groupMeta;
+        
+        // 判断当前用户是否正盯着这个联系人的手机界面看
+        const isActiveView = phoneActive && ((isGroup && currentGroupKey === contactName) || (!isGroup && currentPersona === contactName));
+        
+        if (isActiveView) {
+            const input = phoneWindow?.querySelector('.pm-input');
+            const btn = phoneWindow?.querySelector('.pm-up-btn');
+            if (input) input.disabled = true;
+            if (btn) btn.disabled = true;
+            showTyping();
         }
-        isSelectMode = false;
-        phoneWindow?.querySelector('.pm-trash-btn')?.style.removeProperty('color');
-        const bar = phoneWindow?.querySelector('.pm-confirm-bar'); if (bar) bar.style.display = 'none';
+
+        const ctxData = await gatherContext();
+        const { cardDesc, cardPersonality, cardScenario, cardMesExample, mainChatText, worldBookText, userName, userDesc } = ctxData;
+
+        const userBlock = [`用户名字：${userName}`, userDesc ? `用户人设：${userDesc}` : ''].filter(Boolean).join('\n');
+
+        const systemPrompt = isGroup ? `你同时扮演群聊中的所有成员。` : `你正在扮演"${contactName}"通过手机短信与用户 ${userName} 聊天。`;
+        const userPrompt = isGroup
+            ? `群聊名称：${groupMeta.name}\n群聊成员：${groupMeta.members.join('、')}\n\n用户有一段时间没有说话。请以所有群成员的身份，根据各自的性格、人设和当前聊天上下文，自然地发起话题或继续聊天。每个成员根据人设决定发言 0-8 句。\n\n输出格式：角色名：消息 / 消息\n\n【用户信息】\n${userBlock}\n\n【角色设定】\n${cardDesc || ''}\n\n【性格】\n${cardPersonality || ''}\n\n【场景】\n${cardScenario || ''}\n\n【世界书】\n${worldBookText || ''}\n\n【主线最近对话】\n${mainChatText || ''}`
+            : `用户有一段时间没有回复。作为${contactName}，根据你的人设和当前聊天情境，自然地发送 3-8 句短信继续对话或发起新话题，不要提及用户没有回复这件事。\n\n【用户信息】\n${userBlock}\n\n【角色设定】\n${cardDesc || ''}\n\n【性格】\n${cardPersonality || ''}\n\n【场景】\n${cardScenario || ''}\n\n【对话示例】\n${cardMesExample || ''}\n\n【世界书】\n${worldBookText || ''}\n\n【主线最近对话】\n${mainChatText || ''}\n\n输出格式：短信内容 / 短信内容（每句用 / 分隔，特殊格式中文单行闭合）`;
+
+        try {
+            const raw = await callAI(systemPrompt, userPrompt);
+            let historyUpdated = false;
+            let targetHistory = window.__pmHistories[id]?.[contactName] || [];
+
+            if (isActiveView) hideTyping();
+
+            if (isGroup) {
+                // 后台解析时临时覆盖成员列表，加入安全保护
+                const oldMembers = groupMembers;
+                let parsed = [];
+                try {
+                    groupMembers = groupMeta.members;
+                    parsed = parseGroupResponse(raw);
+                } finally {
+                    // 无论解析成功还是报错，必定将成员列表恢复，防止状态污染
+                    groupMembers = oldMembers;
+                }
+
+                const contentParts = [];
+                for (const block of parsed) {
+                    if (block.sentences.length > 0) {
+                        contentParts.push(`${block.name}：${block.sentences.join(' / ')}`);
+                        if (isActiveView) {
+                            for (const s of block.sentences) { await new Promise(r => setTimeout(r, 120)); addBubble(s, 'left', block.name); }
+                        }
+                    }
+                }
+                if (contentParts.length > 0) {
+                    targetHistory.push({ role: 'assistant', content: contentParts.join('\n') });
+                    historyUpdated = true;
+                }
+            } else {
+                const clean = cleanResponse(raw);
+                const sentences = splitToSentences(clean);
+                if (sentences.length > 0) {
+                    targetHistory.push({ role: 'assistant', content: sentences.join(' / ') });
+                    historyUpdated = true;
+                    if (isActiveView) {
+                        for (const s of sentences) { await new Promise(r => setTimeout(r, 150)); addBubble(s, 'left'); }
+                    }
+                }
+            }
+
+            if (historyUpdated) {
+                if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
+                window.__pmHistories[id][contactName] = targetHistory.slice(-SAVE_LIMIT);
+                saveHistories(); applyBidirectionalInjection();
+                
+                // 如果用户没在看着这个界面，给一条提示
+                if (phoneActive && !isActiveView) {
+                    addNote(`📩 ${isGroup ? groupMeta.name : contactName} 发来了新消息`);
+                }
+            }
+        } catch (e) {
+            if (isActiveView) hideTyping();
+            console.error('[phone-mode] 自动发消息失败', e);
+        }
+
+        if (isActiveView) {
+            const input = phoneWindow?.querySelector('.pm-input'); const btn = phoneWindow?.querySelector('.pm-up-btn');
+            if (input) input.disabled = false; if (btn) btn.disabled = false;
+        }
+        isGenerating = false;
     };
 
-    window.__pmShowModelPicker = () => {
-        const existing = document.getElementById('pm-model-dropdown');
-        if (existing) { existing.remove(); return; }
-        if (!__pmModelList.length) { const s = document.getElementById('pm-api-status'); if (s) { s.textContent = '⚠️ 先拉取模型'; s.style.color = '#ff9500'; } return; }
-        const input = document.getElementById('pm-cfg-model'), rect = input.getBoundingClientRect();
-        const dd = document.createElement('div'); dd.id = 'pm-model-dropdown'; dd.className = 'pm-model-dropdown';
-        if (POPOVER_SUPPORTED) dd.setAttribute('popover', 'manual');
-        dd.innerHTML = `<input class="pm-model-search" placeholder="🔍 搜索..." /><div class="pm-model-options"></div>`;
-        dd.style.left = rect.left + 'px'; dd.style.top = (rect.bottom + 4) + 'px'; dd.style.width = rect.width + 'px';
-        document.body.appendChild(dd); if (dd.showPopover) try { dd.showPopover(); } catch {}
-        const optsDiv = dd.querySelector('.pm-model-options');
-        const render = (f = '') => {
-            const fl = f.toLowerCase(), filtered = __pmModelList.filter(m => !fl || m.toLowerCase().includes(fl));
-            optsDiv.innerHTML = filtered.length ? filtered.map(m => `<div class="pm-model-opt" data-m="${escapeAttr(m)}">${escapeHtml(m)}</div>`).join('') : '<div class="pm-model-empty">无匹配</div>';
-            optsDiv.querySelectorAll('.pm-model-opt').forEach(el => el.addEventListener('click', () => { document.getElementById('pm-cfg-model').value = el.dataset.m; dd.remove(); }));
+    // ========== 拍一拍 & 联系人设置 ==========
+    function showContactConfig(contactName) {
+        const id = getStorageId();
+        const config = window.__pmPokeConfig[id]?.[contactName] || {
+            autoPoke: { enabled: false, interval: 3, counter: 0 }
         };
-        render(); dd.querySelector('.pm-model-search').addEventListener('input', function () { render(this.value); }); dd.querySelector('.pm-model-search').focus();
-        setTimeout(() => { const closer = (e) => { if (!dd.contains(e.target) && e.target.id !== 'pm-model-arrow') { dd.remove(); document.removeEventListener('click', closer, true); } }; document.addEventListener('click', closer, true); }, 0);
-    };
 
-    function makeOverlay(html) {
-        document.getElementById('pm-overlay')?.remove();
-        const ov = document.createElement('div'); ov.id = 'pm-overlay';
-        if (POPOVER_SUPPORTED) ov.setAttribute('popover', 'manual');
-        ov.innerHTML = html;
-        ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
-        document.body.appendChild(ov);
-        if (ov.showPopover) try { ov.showPopover(); } catch {}
-        return ov;
+        makeOverlay(`
+    <div class="pm-modal pm-modal-wide">
+    <div class="pm-modal-header">
+        <b>${escapeHtml(contactName)} 设置</b>
+        <span onclick="window.__pmSaveAndCloseContactConfig('${escapeAttr(contactName)}')" class="pm-modal-close">✕</span>
+    </div>
+    <div style="padding:16px;display:flex;flex-direction:column;gap:16px;">
+
+        <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <span style="font-size:13px;font-weight:600;">⏰ 自动发消息</span>
+            <div onclick="window.__pmToggleAutoPoke('${escapeAttr(contactName)}')"
+                class="pm-custom-check pm-bi-style ${config.autoPoke.enabled ? 'is-checked' : ''}"
+                id="pm-poke-check"
+                style="cursor:pointer;width:22px;height:22px;min-width:22px;min-height:22px;flex-shrink:0;border-radius:50%;">
+            </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:12px;color:#888;">每隔</span>
+            <input id="pm-poke-interval" type="number" min="1" max="99"
+                value="${config.autoPoke.interval}"
+                style="width:50px;border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:13px;text-align:center;"
+                ${!config.autoPoke.enabled ? 'disabled' : ''}>
+            <span style="font-size:12px;color:#888;">轮无输入主动发消息</span>
+        </div>
+        <div style="font-size:11px;color:#999;margin-top:4px;">
+            当前计数：<span id="pm-poke-counter">${config.autoPoke.counter}</span> / ${config.autoPoke.interval}
+        </div>
+        </div>
+
+        <div style="margin-top:4px;">
+        <button onclick="window.__pmPoke('${escapeAttr(contactName)}')"
+                style="width:100%;background:linear-gradient(135deg,#ff9500,#ff6b00);color:#fff;border:none;border-radius:12px;padding:14px;font-size:14px;cursor:pointer;font-weight:600;display:flex;align-items:center;justify-content:center;">
+            拍一拍
+        </button>
+        </div>
+
+    </div>
+    </div>`);
     }
 
+    window.__pmSaveAndCloseContactConfig = (contactName) => {
+        const checkEl = document.getElementById('pm-poke-check');
+        const intervalEl = document.getElementById('pm-poke-interval');
+
+        if (checkEl && intervalEl) {
+            const id = getStorageId();
+            if (!window.__pmPokeConfig[id]) window.__pmPokeConfig[id] = {};
+
+            const enabled = checkEl.classList.contains('is-checked');
+            const interval = parseInt(intervalEl.value) || 3;
+            const oldCounter = window.__pmPokeConfig[id][contactName]?.autoPoke?.counter || 0;
+
+            window.__pmPokeConfig[id][contactName] = {
+                autoPoke: {
+                    enabled,
+                    interval: Math.max(1, Math.min(99, interval)),
+                    counter: enabled ? Math.min(oldCounter, interval - 1) : oldCounter
+                }
+            };
+
+            savePokeConfig();
+        }
+
+        document.getElementById('pm-overlay')?.remove();
+        addNote(`已保存 ${contactName} 的设置`);
+    };
+
+    window.__pmToggleAutoPoke = (contactName) => {
+        const checkEl = document.getElementById('pm-poke-check');
+        const intervalEl = document.getElementById('pm-poke-interval');
+
+        if (!checkEl) return;
+
+        const isChecked = checkEl.classList.toggle('is-checked');
+        if (intervalEl) intervalEl.disabled = !isChecked;
+    };
+
+    window.__pmPoke = async (contactName) => {
+        const id = getStorageId();
+        if (window.__pmPokeConfig[id]?.[contactName]) {
+            window.__pmPokeConfig[id][contactName].autoPoke.counter = 0;
+            savePokeConfig();
+        }
+
+        document.getElementById('pm-overlay')?.remove();
+
+        if (currentPersona !== contactName) {
+            window.__pmSwitchContact(contactName);
+        }
+
+        if (isGenerating) return;
+        isGenerating = true;
+
+        // 禁用输入框和发送按钮
+        const input = phoneWindow?.querySelector('.pm-input');
+        const btn = phoneWindow?.querySelector('.pm-up-btn');
+        if (input) input.disabled = true;
+        if (btn) btn.disabled = true;
+
+        // 显示等待气泡
+        showTyping();
+
+        const ctxData = await gatherContext();
+        const { cardDesc, cardPersonality, cardScenario, cardMesExample, mainChatText, worldBookText, userName, userDesc } = ctxData;
+
+        const userBlock = [
+            `用户名字：${userName}`,
+            userDesc ? `用户人设：${userDesc}` : ''
+        ].filter(Boolean).join('\n');
+
+        const systemPrompt = isGroupChat
+            ? `你同时扮演群聊中的所有成员。`
+            : `你正在扮演"${contactName}"通过手机短信与用户 ${userName} 聊天。`;
+
+        const userPrompt = isGroupChat
+            ? `群聊名称：${groupDisplayName || '群聊'}\n群聊成员：${groupMembers.join('、')}\n\n请以所有群成员的身份，根据各自的性格和当前聊天上下文，自然地发起话题或继续聊天。每个成员根据人设决定发言 0-8 句。\n\n输出格式：角色名：消息内容 / 消息内容\n\n【用户信息】\n${userBlock}\n\n【角色设定】\n${cardDesc || ''}\n\n【性格】\n${cardPersonality || ''}\n\n【场景】\n${cardScenario || ''}\n\n【世界书】\n${worldBookText || ''}\n\n【主线最近对话】\n${mainChatText || ''}`
+            : `作为${contactName}，根据你的人设、性格和当前聊天情境，自然地发送 3-8 句短信，不要提及任何外部触发，就像你自己突然想发消息一样。\n\n【用户信息】\n${userBlock}\n\n【角色设定】\n${cardDesc || ''}\n\n【性格】\n${cardPersonality || ''}\n\n【场景】\n${cardScenario || ''}\n\n【对话示例】\n${cardMesExample || ''}\n\n【世界书】\n${worldBookText || ''}\n\n【主线最近对话】\n${mainChatText || ''}\n\n输出格式：短信内容 / 短信内容（每句用 / 分隔，特殊格式中文单行闭合）`;
+
+        try {
+            const raw = await callAI(systemPrompt, userPrompt);
+            let historyUpdated = false; // 👇 新增标记
+
+            // 隐藏等待气泡
+            hideTyping();
+
+            if (isGroupChat) {
+                const parsed = parseGroupResponse(raw);
+                const contentParts = [];
+                for (const block of parsed) {
+                    if (block.sentences.length > 0) {
+                        contentParts.push(`${block.name}：${block.sentences.join(' / ')}`);
+                        for (const s of block.sentences) {
+                            await new Promise(r => setTimeout(r, 120));
+                            addBubble(s, 'left', block.name);
+                        }
+                    }
+                }
+                if (contentParts.length > 0) {
+                    conversationHistory.push({ role: 'assistant', content: contentParts.join('\n') });
+                    historyUpdated = true;
+                }
+            } else {
+                const clean = cleanResponse(raw);
+                const sentences = splitToSentences(clean);
+                if (sentences.length > 0) {
+                    conversationHistory.push({ role: 'assistant', content: sentences.join(' / ') });
+                    historyUpdated = true;
+                    for (const s of sentences) {
+                        await new Promise(r => setTimeout(r, 150));
+                        addBubble(s, 'left');
+                    }
+                }
+            }
+
+            // 👇 新增：更新本地缓存与双向注入
+            if (historyUpdated) {
+                const id = getStorageId();
+                if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
+                window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
+                saveHistories();
+                applyBidirectionalInjection();
+            }
+        } catch (e) {
+            hideTyping();
+            addNote(`（发送失败：${e?.message || e}）`);
+        }
+
+        // 恢复输入框
+        if (input) input.disabled = false;
+        if (btn) btn.disabled = false;
+        isGenerating = false;
+    };
+
+    window.__pmEditGroup = () => {
+        if (!isGroupChat) {
+            showContactConfig(currentPersona);
+        } else {
+            showGroupForm('edit', groupDisplayName, groupMembers);
+        }
+    };
+
+    // ========== 群聊配置弹窗 ==========
     function showGroupForm(mode, existingName, existingMembers) {
         document.getElementById('pm-overlay')?.remove();
         const title = mode === 'create' ? '新建群聊' : '编辑群聊';
         const initName = existingName || '';
         const initMembers = (existingMembers || []).join(' / ');
-        const closeAction = mode === 'create' ? "window.__pmShowList()" : "document.getElementById('pm-overlay').remove()";
+        const closeAction = mode === 'create'
+            ? "window.__pmShowList()"
+            : "window.__pmSaveAndCloseGroupEdit()";
+
+        let pokeConfig = { enabled: false, interval: 3, counter: 0 };
+        if (mode === 'edit' && currentGroupKey) {
+            const id = getStorageId();
+            pokeConfig = window.__pmPokeConfig[id]?.[currentGroupKey]?.autoPoke || pokeConfig;
+        }
+
         makeOverlay(`
-<div class="pm-modal">
-  <div class="pm-modal-header"><b>${title}</b><span onclick="${closeAction}" class="pm-modal-close">✕</span></div>
-  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
-    <div class="pm-cfg-label">群聊名称</div>
-    <input id="pm-group-name-input" class="pm-cfg-input" placeholder="给群聊起个名字" value="${escapeAttr(initName)}" maxlength="30">
-    <div class="pm-cfg-label" style="margin-top:4px;">成员（用 / 分隔）</div>
-    <input id="pm-group-input" class="pm-cfg-input" placeholder="角色A / 角色B / 角色C" oninput="window.__pmGroupInputChanged()" value="${escapeAttr(initMembers)}">
-    <div id="pm-group-counter" class="pm-cfg-tip" style="text-align:left;font-weight:600;">0/${MAX_GROUP_MEMBERS - 1} 个角色</div>
-    <div id="pm-group-preview" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
-  </div>
-  <div class="pm-modal-add">
-    <button onclick="window.__pmConfirmGroup('${mode}','${escapeAttr(existingName || '')}')" style="flex:1;background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">${mode === 'create' ? '创建' : '保存'}</button>
-  </div>
-</div>`);
+    <div class="pm-modal pm-modal-wide">
+    <div class="pm-modal-header"><b>${title}</b><span onclick="${closeAction}" class="pm-modal-close">✕</span></div>
+    <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+        <div class="pm-cfg-label">群聊名称</div>
+        <input id="pm-group-name-input" class="pm-cfg-input" placeholder="给群聊起个名字" value="${escapeAttr(initName)}" maxlength="30">
+        <div class="pm-cfg-label" style="margin-top:4px;">成员（用 / 分隔）</div>
+        <input id="pm-group-input" class="pm-cfg-input" placeholder="角色A / 角色B / 角色C" oninput="window.__pmGroupInputChanged()" value="${escapeAttr(initMembers)}">
+        <div id="pm-group-counter" class="pm-cfg-tip" style="text-align:left;font-weight:600;">0/${MAX_GROUP_MEMBERS - 1} 个角色</div>
+        <div id="pm-group-preview" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+
+        ${mode === 'edit' ? `
+        <div style="margin-top:6px;padding-top:16px;border-top:1px solid #f0f0f0;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <span style="font-size:13px;font-weight:600;">⏰ 自动发消息</span>
+            <div onclick="window.__pmToggleAutoPokeGroup()"
+                class="pm-custom-check pm-bi-style ${pokeConfig.enabled ? 'is-checked' : ''}"
+                id="pm-poke-check-group"
+                style="cursor:pointer;width:22px;height:22px;min-width:22px;min-height:22px;flex-shrink:0;border-radius:50%;">
+            </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:12px;color:#888;">每隔</span>
+            <input id="pm-poke-interval-group" type="number" min="1" max="99"
+                value="${pokeConfig.interval}"
+                style="width:50px;border:1px solid #ddd;border-radius:6px;padding:4px 8px;font-size:13px;text-align:center;"
+                ${!pokeConfig.enabled ? 'disabled' : ''}>
+            <span style="font-size:12px;color:#888;">轮无输入主动发消息</span>
+        </div>
+        <div style="font-size:11px;color:#999;margin-top:4px;">
+            当前计数：<span id="pm-poke-counter-group">${pokeConfig.counter}</span> / ${pokeConfig.interval}
+        </div>
+        <div style="margin-top:12px;">
+            <button onclick="window.__pmPokeGroup()"
+                    style="width:100%;background:linear-gradient(135deg,#ff9500,#ff6b00);color:#fff;border:none;border-radius:12px;padding:14px;font-size:14px;cursor:pointer;font-weight:600;display:flex;align-items:center;justify-content:center;">
+            拍一拍
+            </button>
+        </div>
+        </div>
+        ` : ''}
+    </div>
+    ${mode === 'create' ? `
+    <div class="pm-modal-add">
+        <button onclick="window.__pmConfirmGroup('create','')" style="flex:1;background:#007aff;color:#fff;border:none;border-radius:10px;padding:10px;font-size:13px;cursor:pointer;font-weight:600;">创建</button>
+    </div>
+    ` : ''}
+    </div>`);
         setTimeout(() => window.__pmGroupInputChanged(), 0);
     }
+
+    window.__pmToggleAutoPokeGroup = () => {
+        const checkEl = document.getElementById('pm-poke-check-group');
+        const intervalEl = document.getElementById('pm-poke-interval-group');
+
+        if (!checkEl) return;
+
+        const isChecked = checkEl.classList.toggle('is-checked');
+        if (intervalEl) intervalEl.disabled = !isChecked;
+    };
+
+    window.__pmPokeGroup = async () => {
+        if (!isGroupChat || !currentGroupKey) return;
+
+        const id = getStorageId();
+        if (window.__pmPokeConfig[id]?.[currentGroupKey]) {
+            window.__pmPokeConfig[id][currentGroupKey].autoPoke.counter = 0;
+            savePokeConfig();
+        }
+
+        document.getElementById('pm-overlay')?.remove();
+
+        if (isGenerating) return;
+        isGenerating = true;
+
+        // 禁用输入框和发送按钮
+        const input = phoneWindow?.querySelector('.pm-input');
+        const btn = phoneWindow?.querySelector('.pm-up-btn');
+        if (input) input.disabled = true;
+        if (btn) btn.disabled = true;
+
+        // 显示等待气泡
+        showTyping();
+
+        const ctxData = await gatherContext();
+        const { cardDesc, cardPersonality, cardScenario, mainChatText, worldBookText, userName, userDesc } = ctxData;
+
+        const userBlock = [
+            `用户名字：${userName}`,
+            userDesc ? `用户人设：${userDesc}` : ''
+        ].filter(Boolean).join('\n');
+
+        const systemPrompt = `你同时扮演群聊中的所有成员。`;
+        const userPrompt = `群聊名称：${groupDisplayName || '群聊'}\n群聊成员：${groupMembers.join('、')}\n\n请以每个群成员的身份，根据各自的性格、人设和当前聊天上下文，自然地发起话题或继续聊天，不要提及任何外部触发。\n每个成员根据自己的判断选择发言 0-8 条。\n\n输出格式：角色名：消息内容 / 消息内容\n\n【用户信息】\n${userBlock}\n\n【角色设定】\n${cardDesc || ''}\n\n【性格】\n${cardPersonality || ''}\n\n【场景】\n${cardScenario || ''}\n\n【世界书】\n${worldBookText || ''}\n\n【主线最近对话】\n${mainChatText || ''}`;
+
+        try {
+            const raw = await callAI(systemPrompt, userPrompt);
+
+            // 隐藏等待气泡
+            hideTyping();
+
+            const parsed = parseGroupResponse(raw);
+            const contentParts = []; // 👇 新增：用于收集要保存的群聊内容
+            
+            for (const block of parsed) {
+                if (block.sentences.length > 0) {
+                    contentParts.push(`${block.name}：${block.sentences.join(' / ')}`);
+                    for (const s of block.sentences) {
+                        await new Promise(r => setTimeout(r, 120));
+                        addBubble(s, 'left', block.name);
+                    }
+                }
+            }
+            
+            // 👇 新增：将聊天记录正式存入数据库
+            if (contentParts.length > 0) {
+                conversationHistory.push({ role: 'assistant', content: contentParts.join('\n') });
+                const id = getStorageId();
+                if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
+                window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
+                saveHistories();
+                applyBidirectionalInjection();
+            }
+        } catch (e) {
+            hideTyping();
+            addNote(`（发送失败：${e?.message || e}）`);
+        }
+
+        // 恢复输入框
+        if (input) input.disabled = false;
+        if (btn) btn.disabled = false;
+        isGenerating = false;
+    };
+
+    window.__pmSaveAndCloseGroupEdit = () => {
+        const nameInput = document.getElementById('pm-group-name-input');
+        const memInput = document.getElementById('pm-group-input');
+
+        if (nameInput && memInput && currentGroupKey) {
+            const groupName = nameInput.value.trim();
+            const names = memInput.value.split(/[/／]/).map(s => s.trim()).filter(Boolean).slice(0, MAX_GROUP_MEMBERS - 1);
+
+            if (groupName && names.length >= 2) {
+                const id = getStorageId();
+                if (!window.__pmGroupMeta[id]) window.__pmGroupMeta[id] = {};
+                window.__pmGroupMeta[id][currentGroupKey] = { name: groupName, members: names };
+                saveGroupMeta();
+
+                groupMembers = names; groupDisplayName = groupName;
+                groupColorMap = {};
+                names.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
+            }
+
+            const checkEl = document.getElementById('pm-poke-check-group');
+            const intervalEl = document.getElementById('pm-poke-interval-group');
+
+            if (checkEl && intervalEl) {
+                const id = getStorageId();
+                if (!window.__pmPokeConfig[id]) window.__pmPokeConfig[id] = {};
+
+                const enabled = checkEl.classList.contains('is-checked');
+                const interval = parseInt(intervalEl.value) || 3;
+                const oldCounter = window.__pmPokeConfig[id][currentGroupKey]?.autoPoke?.counter || 0;
+
+                window.__pmPokeConfig[id][currentGroupKey] = {
+                    autoPoke: {
+                        enabled,
+                        interval: Math.max(1, Math.min(99, interval)),
+                        counter: enabled ? Math.min(oldCounter, interval - 1) : oldCounter
+                    }
+                };
+
+                savePokeConfig();
+            }
+        }
+
+        document.getElementById('pm-overlay')?.remove();
+
+        if (phoneWindow && currentGroupKey) {
+            window.__pmSwitch(currentGroupKey);
+        }
+    };
 
     window.__pmShowGroupCreate = () => showGroupForm('create');
 
@@ -917,6 +1535,7 @@ ${currentPersona}：`;
         const names = memInput.value.split(/[/／]/).map(s => s.trim()).filter(Boolean).slice(0, MAX_GROUP_MEMBERS - 1);
         if (!groupName) { alert('请输入群聊名称'); return; }
         if (names.length < 2) { alert('至少需要 2 个角色'); return; }
+
         document.getElementById('pm-overlay')?.remove();
         const id = getStorageId();
         if (!window.__pmGroupMeta[id]) window.__pmGroupMeta[id] = {};
@@ -927,23 +1546,29 @@ ${currentPersona}：`;
             isGroupChat = true; groupMembers = names; groupDisplayName = groupName; currentGroupKey = groupKey;
             groupColorMap = {}; names.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
             window.__pmSwitch(groupKey);
-        } else {
-            if (!currentGroupKey) return;
-            window.__pmGroupMeta[id][currentGroupKey] = { name: groupName, members: names };
-            saveGroupMeta();
-            groupMembers = names; groupDisplayName = groupName;
-            groupColorMap = {}; names.forEach((n, i) => { groupColorMap[n] = GROUP_COLORS[i % GROUP_COLORS.length]; });
-            window.__pmSwitch(currentGroupKey);
         }
     };
 
-    window.__pmEditGroup = () => {
-        if (!isGroupChat) return;
-        showGroupForm('edit', groupDisplayName, groupMembers);
+    window.__pmSetDarkMode = (mode) => {
+        window.__pmTheme.darkMode = mode;
+        saveTheme();
+        if (phoneWindow) {
+            phoneWindow.setAttribute('data-theme', mode);
+        }
+        document.querySelectorAll('.pm-layout-chip').forEach(el => {
+            if (el.textContent.includes('日间') || el.textContent.includes('夜间')) {
+                el.classList.toggle('pm-layout-active',
+                    (mode === 'light' && el.textContent.includes('日间')) ||
+                    (mode === 'dark' && el.textContent.includes('夜间'))
+                );
+            }
+        });
     };
 
-    window.__pmShowConfig = () => {
-        loadProfiles(); loadTheme(); loadBgSettings();
+    // ========== 设置界面 ==========
+    window.__pmShowConfig = async () => {
+        loadProfiles(); loadTheme();
+        await loadBgSettings();
         const cfg = window.__pmConfig, t = window.__pmTheme;
         const shortUrl = (u) => (u || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const maskKey = (k) => !k ? '' : (k.length <= 8 ? '****' : k.slice(0, 4) + '****' + k.slice(-4));
@@ -1003,7 +1628,12 @@ ${currentPersona}：`;
       </div>
     </div>
     <div id="pm-tab-look" class="pm-tab-pane" style="display:none;">
-      <div style="padding:12px 16px;">
+      <div style="padding:12px 16px 0;"> <div class="pm-cfg-label" style="margin-bottom:8px;">🌓 日夜模式</div>
+        <div class="pm-theme-row" style="margin-bottom:8px;"> <div class="pm-layout-chip ${t.darkMode === 'light' ? 'pm-layout-active' : ''}" onclick="window.__pmSetDarkMode('light')">☀️ 日间</div>
+          <div class="pm-layout-chip ${t.darkMode === 'dark' ? 'pm-layout-active' : ''}" onclick="window.__pmSetDarkMode('dark')">🌙 夜间</div>
+        </div>
+      </div>
+      <div style="padding:12px 16px;border-top:1px solid #f0f0f0;">
         <div class="pm-cfg-label" style="margin-bottom:8px;">📐 界面布局</div>
         <div class="pm-layout-row">${layoutBtns}</div>
       </div>
@@ -1049,6 +1679,7 @@ ${currentPersona}：`;
 </div>`);
     };
 
+    // ========== 其余辅助函数 ==========
     window.__pmSwitchTab = (tab) => {
         document.querySelectorAll('.pm-cfg-tab').forEach(el => el.classList.toggle('pm-cfg-tab-active', el.dataset.tab === tab));
         document.querySelectorAll('.pm-tab-pane').forEach(el => el.style.display = 'none');
@@ -1113,9 +1744,17 @@ ${currentPersona}：`;
         setTimeout(() => window.__pmSwitchTab('look'), 50);
     };
 
-    window.__pmClearBg = (scope) => {
-        if (scope === 'global') { window.__pmBgGlobal = ''; saveBgGlobal(); }
-        else { const id = getStorageId(); delete window.__pmBgLocal[`${id}_${currentPersona}`]; saveBgLocal(); }
+    window.__pmClearBg = async (scope) => {
+        if (scope === 'global') {
+            window.__pmBgGlobal = '';
+            await pmIDBDel('ST_SMS_BG_GLOBAL');
+            try { localStorage.removeItem('ST_SMS_BG_GLOBAL'); } catch {}
+        } else {
+            const id = getStorageId(), key = `${id}_${currentPersona}`;
+            delete window.__pmBgLocal[key];
+            await pmIDBDel('ST_SMS_BG_LOCAL_' + key);
+            await saveBgLocal();
+        }
         applyBackground();
         window.__pmShowConfig();
         setTimeout(() => window.__pmSwitchTab('look'), 50);
@@ -1156,6 +1795,38 @@ ${currentPersona}：`;
         document.getElementById('pm-overlay')?.remove();
         addNote(`已保存：${window.__pmConfig.useIndependent && apiUrl ? '独立API' : '主API'}`);
     };
+
+    window.__pmShowModelPicker = () => {
+        const existing = document.getElementById('pm-model-dropdown');
+        if (existing) { existing.remove(); return; }
+        if (!__pmModelList.length) { const s = document.getElementById('pm-api-status'); if (s) { s.textContent = '⚠️ 先拉取模型'; s.style.color = '#ff9500'; } return; }
+        const input = document.getElementById('pm-cfg-model'), rect = input.getBoundingClientRect();
+        const dd = document.createElement('div'); dd.id = 'pm-model-dropdown'; dd.className = 'pm-model-dropdown';
+        if (POPOVER_SUPPORTED) dd.setAttribute('popover', 'manual');
+        dd.innerHTML = `<input class="pm-model-search" placeholder="🔍 搜索..." /><div class="pm-model-options"></div>`;
+        dd.style.left = rect.left + 'px'; dd.style.top = (rect.bottom + 4) + 'px'; dd.style.width = rect.width + 'px';
+        document.body.appendChild(dd); if (dd.showPopover) try { dd.showPopover(); } catch {}
+        const optsDiv = dd.querySelector('.pm-model-options');
+        const render = (f = '') => {
+            const fl = f.toLowerCase(), filtered = __pmModelList.filter(m => !fl || m.toLowerCase().includes(fl));
+            optsDiv.innerHTML = filtered.length ? filtered.map(m => `<div class="pm-model-opt" data-m="${escapeAttr(m)}">${escapeHtml(m)}</div>`).join('') : '<div class="pm-model-empty">无匹配</div>';
+            optsDiv.querySelectorAll('.pm-model-opt').forEach(el => el.addEventListener('click', () => { document.getElementById('pm-cfg-model').value = el.dataset.m; dd.remove(); }));
+        };
+        render(); dd.querySelector('.pm-model-search').addEventListener('input', function () { render(this.value); }); dd.querySelector('.pm-model-search').focus();
+        setTimeout(() => { const closer = (e) => { if (!dd.contains(e.target) && e.target.id !== 'pm-model-arrow') { dd.remove(); document.removeEventListener('click', closer, true); } }; document.addEventListener('click', closer, true); }, 0);
+    };
+
+    function makeOverlay(html) {
+        document.getElementById('pm-overlay')?.remove();
+        const ov = document.createElement('div'); ov.id = 'pm-overlay';
+        if (POPOVER_SUPPORTED) ov.setAttribute('popover', 'manual');
+        ov.innerHTML = html;
+        ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+        document.body.appendChild(ov);
+        if (ov.showPopover) try { ov.showPopover(); } catch {}
+        return ov;
+    }
+
     window.__pmShowList = () => {
         const id = getStorageId();
         loadGroupMeta();
@@ -1167,37 +1838,39 @@ ${currentPersona}：`;
 
         const renderSingle = singleList.map(n => {
             const isChk = checked.includes(n);
+            const safeName = escapeAttr(n);
             return `<div class="pm-li">
-                <div class="pm-custom-check pm-bi-style ${isChk ? 'is-checked' : ''}" onclick="event.stopPropagation();window.__pmToggleBidirectional('${n.replace(/'/g, "\\'")}')"></div>
-                <span onclick="window.__pmSwitchContact('${n.replace(/'/g, "\\'")}')">${escapeHtml(n)}</span>
-                <i onclick="window.__pmDel('${n.replace(/'/g, "\\'")}')">删除</i>
+                <div class="pm-custom-check pm-bi-style ${isChk ? 'is-checked' : ''}" onclick="event.stopPropagation();window.__pmToggleBidirectional('${safeName}')" style="width:20px;height:20px;min-width:20px;min-height:20px;flex-shrink:0;border-radius:50%;"></div>
+                <span onclick="window.__pmSwitchContact('${safeName}')">${escapeHtml(n)}</span>
+                <i onclick="window.__pmDel('${safeName}')">删除</i>
             </div>`;
         }).join('');
 
         const renderGroups = groupList.map(key => {
             const meta = groups[key];
             const isChk = checked.includes(key);
+            const safeKey = escapeAttr(key);
             return `<div class="pm-li">
-                <div class="pm-custom-check pm-bi-style ${isChk ? 'is-checked' : ''}" onclick="event.stopPropagation();window.__pmToggleBidirectional('${key}')"></div>
-                <span onclick="window.__pmSwitchContact('${key}')">${escapeHtml(meta.name)}<span class="pm-group-sub">${escapeHtml(meta.members.join('、'))}</span></span>
-                <i onclick="window.__pmDelGroup('${key}')">删除</i>
+                <div class="pm-custom-check pm-bi-style ${isChk ? 'is-checked' : ''}" onclick="event.stopPropagation();window.__pmToggleBidirectional('${safeKey}')" style="width:20px;height:20px;min-width:20px;min-height:20px;flex-shrink:0;border-radius:50%;"></div>
+                <span onclick="window.__pmSwitchContact('${safeKey}')">${escapeHtml(meta.name)}<span class="pm-group-sub">${escapeHtml(meta.members.join('、'))}</span></span>
+                <i onclick="window.__pmDelGroup('${safeKey}')">删除</i>
             </div>`;
         }).join('');
 
         const empty = !singleList.length && !groupList.length;
 
         makeOverlay(`
-<div class="pm-modal">
-  <div class="pm-modal-header"><b>联系人</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
-  <div class="pm-bi-bar"><span>🧠 勾选角色/群聊可被主楼读取短信</span><span class="pm-bi-tip">已选 ${checked.length}/${MAX_BIDIRECTIONAL}</span></div>
-  <div class="pm-modal-list">
-    ${empty ? '<div style="text-align:center;color:#999;padding:20px;font-size:13px;">暂无联系人</div>' : (renderGroups + renderSingle)}
-  </div>
-  <div class="pm-modal-add" style="display:flex;gap:8px;">
-    <button onclick="window.__pmShowGroupCreate()" class="pm-btn-group">👥 新建群聊</button>
-    <button onclick="window.__pmShowAddContact()" class="pm-btn-add">＋ 添加联系人</button>
-  </div>
-</div>`);
+    <div class="pm-modal">
+    <div class="pm-modal-header"><b>联系人</b><span onclick="document.getElementById('pm-overlay').remove()" class="pm-modal-close">✕</span></div>
+    <div class="pm-bi-bar"><span>🧠 勾选角色/群聊可被主楼读取短信</span><span class="pm-bi-tip">已选 ${checked.length}/${MAX_BIDIRECTIONAL}</span></div>
+    <div class="pm-modal-list">
+        ${empty ? '<div style="text-align:center;color:#999;padding:20px;font-size:13px;">暂无联系人</div>' : (renderGroups + renderSingle)}
+    </div>
+    <div class="pm-modal-add" style="display:flex;gap:8px;">
+        <button onclick="window.__pmShowGroupCreate()" class="pm-btn-group">👥 新建群聊</button>
+        <button onclick="window.__pmShowAddContact()" class="pm-btn-add">＋ 添加联系人</button>
+    </div>
+    </div>`);
     };
 
     window.__pmShowAddContact = () => {
@@ -1222,14 +1895,28 @@ ${currentPersona}：`;
         }, 0);
     };
 
-    window.__pmDelGroup = (key) => {
+    window.__pmDelGroup = async (key) => {
         const id = getStorageId();
         if (window.__pmGroupMeta[id]) delete window.__pmGroupMeta[id][key];
         if (window.__pmHistories[id]) delete window.__pmHistories[id][key];
+
         const arr = window.__pmBidirectional[id] || [], idx = arr.indexOf(key);
         if (idx >= 0) { arr.splice(idx, 1); window.__pmBidirectional[id] = arr; saveBidirectional(); }
+
+        const bgKey = `${id}_${key}`;
+        if (window.__pmBgLocal[bgKey]) {
+            delete window.__pmBgLocal[bgKey];
+            await pmIDBDel('ST_SMS_BG_LOCAL_' + bgKey);
+            await saveBgLocal();
+        }
+
+        if (window.__pmPokeConfig[id]?.[key]) {
+            delete window.__pmPokeConfig[id][key];
+            savePokeConfig();
+        }
+
         saveGroupMeta();
-        try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+        saveHistories();
         applyBidirectionalInjection();
         window.__pmShowList();
     };
@@ -1260,15 +1947,16 @@ ${currentPersona}：`;
         if (phoneWindow) {
             const nameEl = phoneWindow.querySelector('.pm-name');
             const editBtn = phoneWindow.querySelector('.pm-name-edit');
-            if (isGroupChat) {
-                const display = groupDisplayName || name;
-                const arr = [...display];
-                nameEl.textContent = arr.length > 5 ? arr.slice(0, 5).join('') + '...' : display;
-                if (editBtn) editBtn.classList.remove('is-hidden');
-            } else {
-                nameEl.textContent = name;
-                if (editBtn) editBtn.classList.add('is-hidden');
+            if (nameEl) {
+                if (isGroupChat) {
+                    const display = groupDisplayName || name;
+                    const arr = [...display];
+                    nameEl.textContent = arr.length > 5 ? arr.slice(0, 5).join('') + '...' : display;
+                } else {
+                    nameEl.textContent = name;
+                }
             }
+            if (editBtn) editBtn.classList.remove('is-hidden');
             fitNameFont();
             const list = phoneWindow.querySelector('.pm-msg-list'); list.innerHTML = '';
             if (conversationHistory.length > 0) {
@@ -1280,19 +1968,13 @@ ${currentPersona}：`;
                             const match = line.match(/^(.{1,20})[：:]\s*(.+)$/);
                             if (match && groupMembers.some(gm => gm.toLowerCase() === match[1].trim().toLowerCase())) {
                                 const sender = groupMembers.find(gm => gm.toLowerCase() === match[1].trim().toLowerCase());
-                                const protect = match[2].replace(/[\(（][^)）]+[\)\）]/g, mm => mm.replace(/\//g, '\u0001'));
-                                protect.split(/\s*\/\s*/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
-                                    .forEach(s => addBubble(s, 'left', sender));
+                                splitToSentences(match[2]).forEach(s => addBubble(s, 'left', sender));
                             } else {
-                                const protect = line.replace(/[\(（][^)）]+[\)\）]/g, mm => mm.replace(/\//g, '\u0001'));
-                                protect.split(/\s*\/\s*/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
-                                    .forEach(s => addBubble(s, 'left'));
+                                splitToSentences(line).forEach(s => addBubble(s, 'left'));
                             }
                         }
                     } else {
-                        const protect = m.content.replace(/[\(（][^)）]+[\)\）]/g, mm => mm.replace(/\//g, '\u0001'));
-                        protect.split(/\s*\/\s*/).map(s => s.replace(/\u0001/g, '/').trim()).filter(Boolean)
-                            .forEach(s => addBubble(s, m.role === 'user' ? 'right' : 'left'));
+                        splitToSentences(m.content).forEach(s => addBubble(s, m.role === 'user' ? 'right' : 'left'));
                     }
                 });
                 addNote('── 以上为历史 ──');
@@ -1302,13 +1984,93 @@ ${currentPersona}：`;
         applyBidirectionalInjection();
     };
 
-    window.__pmDel = (name) => {
+    window.__pmDel = async (name) => {
         const id = getStorageId();
         if (window.__pmHistories[id]) delete window.__pmHistories[id][name];
-        try { localStorage.setItem('ST_SMS_DATA_V2', JSON.stringify(window.__pmHistories)); } catch {}
+        saveHistories();
+
         const arr = window.__pmBidirectional[id] || [], idx = arr.indexOf(name);
         if (idx >= 0) { arr.splice(idx, 1); window.__pmBidirectional[id] = arr; saveBidirectional(); }
-        applyBidirectionalInjection(); window.__pmShowList();
+
+        const bgKey = `${id}_${name}`;
+        if (window.__pmBgLocal[bgKey]) {
+            delete window.__pmBgLocal[bgKey];
+            await pmIDBDel('ST_SMS_BG_LOCAL_' + bgKey);
+            await saveBgLocal();
+        }
+
+        if (window.__pmPokeConfig[id]?.[name]) {
+            delete window.__pmPokeConfig[id][name];
+            savePokeConfig();
+        }
+
+        applyBidirectionalInjection();
+        window.__pmShowList();
+    };
+
+    window.__pmToggleSelect = () => {
+        isSelectMode = !isSelectMode;
+        const list = phoneWindow?.querySelector('.pm-msg-list');
+        const trashBtn = phoneWindow?.querySelector('.pm-trash-btn');
+        const confirmBar = phoneWindow?.querySelector('.pm-confirm-bar');
+        if (!list) return;
+        if (isSelectMode) {
+            trashBtn.style.color = '#ff3b30'; confirmBar.style.display = 'flex';
+            list.querySelectorAll('.pm-bubble, .pm-group-bubble-wrap').forEach(b => {
+                if (b.id === 'pm-typing' || b.closest('.pm-select-wrap')) return;
+                const wrap = document.createElement('div'); wrap.className = 'pm-select-wrap';
+                
+                // 👇 新增：给外层包裹器增加 Flex 布局，让勾选框和气泡横向对齐
+                wrap.style.display = 'flex';
+                wrap.style.alignItems = 'center';
+                wrap.style.gap = '8px';
+                // 根据气泡属于左边还是右边，决定整个包裹器靠左还是靠右
+                wrap.style.alignSelf = b.dataset.side === 'right' ? 'flex-end' : 'flex-start';
+                
+                const cb = document.createElement('div'); cb.className = 'pm-custom-check'; cb.dataset.checked = '0';
+                
+                // 👇 新增：给动态生成的勾选框直接赋上尺寸、圆角等必须样式
+                cb.style.width = '22px';
+                cb.style.height = '22px';
+                cb.style.minWidth = '22px';
+                cb.style.minHeight = '22px';
+                cb.style.borderRadius = '50%';
+                cb.style.flexShrink = '0';
+                cb.style.cursor = 'pointer';
+                
+                cb.onclick = () => { cb.dataset.checked = cb.dataset.checked === '0' ? '1' : '0'; };
+                b.parentNode.insertBefore(wrap, b);
+                wrap.appendChild(cb); wrap.appendChild(b);
+                wrap.dataset.side = b.dataset.side || ''; wrap.dataset.text = b.dataset.text || '';
+            });
+        } else {
+            trashBtn.style.color = ''; confirmBar.style.display = 'none';
+            list.querySelectorAll('.pm-select-wrap').forEach(wrap => {
+                const b = wrap.querySelector('.pm-bubble, .pm-group-bubble-wrap');
+                if (b) wrap.parentNode.insertBefore(b, wrap); wrap.remove();
+            });
+        }
+    };
+
+    window.__pmDeleteSelected = () => {
+        const list = phoneWindow?.querySelector('.pm-msg-list'); if (!list) return;
+        const toDelete = new Set();
+        list.querySelectorAll('.pm-select-wrap').forEach(wrap => {
+            const cb = wrap.querySelector('.pm-custom-check');
+            if (cb?.dataset.checked === '1') { toDelete.add(wrap.dataset.text); wrap.remove(); }
+            else { const b = wrap.querySelector('.pm-bubble, .pm-group-bubble-wrap'); if (b) wrap.parentNode.insertBefore(b, wrap); wrap.remove(); }
+        });
+        if (toDelete.size > 0) {
+            conversationHistory = conversationHistory.filter(m => !m.content.split(/\s*\/\s*/).some(p => toDelete.has(p.trim())));
+            const id = getStorageId();
+            if (!window.__pmHistories[id]) window.__pmHistories[id] = {};
+            window.__pmHistories[id][currentPersona] = conversationHistory.slice(-SAVE_LIMIT);
+            saveHistories();
+            applyBidirectionalInjection();
+        }
+        isSelectMode = false;
+        phoneWindow?.querySelector('.pm-trash-btn')?.style.removeProperty('color');
+        const bar = phoneWindow?.querySelector('.pm-confirm-bar'); if (bar) bar.style.display = 'none';
     };
 
     window.__pmToggleMin = () => { isMinimized = !isMinimized; phoneWindow.classList.toggle('is-min', isMinimized); phoneWindow.style.removeProperty('transform'); };
@@ -1337,12 +2099,23 @@ ${currentPersona}：`;
             window.__pmConfig = saved || { apiUrl: '', apiKey: '', model: '', useIndependent: false };
             if (typeof window.__pmConfig.useIndependent === 'undefined') window.__pmConfig.useIndependent = !!(window.__pmConfig.apiUrl && window.__pmConfig.apiKey);
         } catch { window.__pmConfig = { apiUrl: '', apiKey: '', model: '', useIndependent: false }; }
-        loadProfiles(); loadBidirectional(); loadTheme(); loadBgSettings(); loadGroupMeta(); migrateOldHistory();
-        hookGenerationEvent(); // 🔧 挂钩事件
+        loadProfiles(); loadBidirectional(); loadTheme(); loadGroupMeta(); loadPokeConfig(); migrateOldHistory();
+        loadBgSettings().then(() => { try { applyBackground(); } catch {} });
+        loadHistoriesFromIDB().then(() => {
+            if (phoneWindow && currentPersona) {
+                const id = getStorageId();
+                const fresh = window.__pmHistories[id]?.[currentPersona];
+                if (fresh && fresh.length > conversationHistory.length) {
+                    window.__pmSwitch(currentPersona);
+                }
+            }
+        });
+        hookGenerationEvent();
         const c = getCtx(), defaultChar = c?.characters?.[c.characterId]?.name ?? 'AI';
 
         phoneWindow = document.createElement('div'); phoneWindow.id = 'pm-iphone';
         phoneWindow.dataset.layout = window.__pmTheme.layout || 'standard';
+        phoneWindow.setAttribute('data-theme', window.__pmTheme.darkMode || 'light');
         if (POPOVER_SUPPORTED) phoneWindow.setAttribute('popover', 'manual');
 
         const editSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
@@ -1354,7 +2127,7 @@ ${currentPersona}：`;
     <button onclick="window.__pmShowList()" class="pm-nav-btn pm-nav-left-btn">☰</button>
     <div class="pm-name-wrap">
       <div class="pm-name">${escapeHtml(defaultChar)}</div>
-      <button onclick="window.__pmEditGroup()" class="pm-name-edit is-hidden" title="编辑群聊">${editSvg}</button>
+      <button onclick="window.__pmEditGroup()" class="pm-name-edit is-hidden" title="编辑">${editSvg}</button>
     </div>
     <div class="pm-nav-right">
       <button onclick="window.__pmToggleSelect()" class="pm-nav-btn pm-trash-btn">🗑</button>
@@ -1399,6 +2172,57 @@ ${currentPersona}：`;
     font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif !important;
     touch-action:none;box-sizing:border-box !important;pointer-events:auto !important;filter:none !important;color:#000 !important;
 }
+
+#pm-iphone[data-theme="light"] {
+    --pm-bg: #fff;
+    --pm-navbar-bg: #fff;
+    --pm-navbar-border: #f0f0f0;
+    --pm-input-bg: #f2f2f7;
+    --pm-list-bg: #fff;
+    --pm-text: #000;
+    --pm-name-color: #000;
+}
+
+#pm-iphone[data-theme="dark"] {
+    --pm-bg: #1c1c1e;
+    --pm-navbar-bg: #1c1c1e;
+    --pm-navbar-border: #38383a;
+    --pm-input-bg: #2c2c2e;
+    --pm-list-bg: #1c1c1e;
+    --pm-text: #e5e5e5;
+    --pm-name-color: #ccc;
+}
+
+#pm-iphone{background:var(--pm-bg,#fff) !important;}
+.pm-main-ui{background:var(--pm-bg,#fff) !important;}
+.pm-navbar{background:var(--pm-navbar-bg,#fff) !important;border-bottom-color:var(--pm-navbar-border,#f0f0f0) !important;}
+.pm-name{color:var(--pm-name-color,#000) !important;}
+.pm-input{background:var(--pm-input-bg,#f2f2f7) !important;color:var(--pm-text,#000) !important;}
+
+
+#pm-iphone[data-theme="dark"] .pm-li:hover{background:#2c2c2e;}
+#pm-iphone[data-theme="dark"] .pm-modal{background:#1c1c1e !important;color:#e5e5e5 !important;}
+#pm-iphone[data-theme="dark"] .pm-modal-header{border-bottom-color:#38383a !important;}
+#pm-iphone[data-theme="dark"] .pm-modal-header b{color:#e5e5e5 !important;}
+#pm-iphone[data-theme="dark"] .pm-cfg-input{background:#2c2c2e !important;color:#e5e5e5 !important;border-color:#48484a !important;}
+#pm-iphone[data-theme="dark"] .pm-cfg-label{color:#aaa !important;}
+#pm-iphone[data-theme="dark"] .pm-cfg-tab{color:#aaa !important;}
+#pm-iphone[data-theme="dark"] .pm-cfg-tab-active{color:#0a84ff !important;}
+#pm-iphone[data-theme="dark"] .pm-cfg-tabs{border-bottom-color:#38383a !important;}
+#pm-iphone[data-theme="dark"] .pm-layout-chip,#pm-iphone[data-theme="dark"] .pm-theme-chip{background:#2c2c2e !important;color:#ccc !important;}
+#pm-iphone[data-theme="dark"] .pm-layout-active,#pm-iphone[data-theme="dark"] .pm-theme-active{border-color:#0a84ff !important;color:#0a84ff !important;background:#1c2a3a !important;}
+#pm-iphone[data-theme="dark"] .pm-bg-btn{background:#2c2c2e !important;border-color:#48484a !important;color:#ccc !important;}
+#pm-iphone[data-theme="dark"] .pm-prof-list{background:#2c2c2e !important;border-color:#48484a !important;}
+#pm-iphone[data-theme="dark"] .pm-prof-li:hover{background:#3a3a3c !important;}
+#pm-iphone[data-theme="dark"] .pm-mode-switch{background:#2c2c2e !important;}
+#pm-iphone[data-theme="dark"] .pm-mode-opt{color:#aaa !important;}
+#pm-iphone[data-theme="dark"] .pm-mode-active{background:#3a3a3c !important;color:#0a84ff !important;}
+#pm-iphone[data-theme="dark"] .pm-bi-bar{background:#2c2410 !important;border-bottom-color:#4a3a10 !important;color:#b8902a !important;}
+#pm-iphone[data-theme="dark"] .pm-confirm-bar{background:#2c2410 !important;border-bottom-color:#4a3a10 !important;}
+#pm-iphone[data-theme="dark"] .pm-note{color:#666 !important;}
+#pm-iphone[data-theme="dark"] .pm-group-name{color:#aaa !important;}
+#pm-iphone[data-theme="dark"] .pm-island{background:#48484a;}
+
 #pm-iphone.is-min{inset:auto 40px 40px auto !important;height:50px !important;min-height:50px !important;max-height:50px !important;width:140px !important;min-width:140px !important;max-width:140px !important;border-radius:25px !important;border-width:6px !important;}
 #pm-iphone.is-min .pm-main-ui{display:none !important;}
 #pm-iphone *,#pm-iphone *::before,#pm-iphone *::after{box-sizing:border-box;}
@@ -1408,7 +2232,7 @@ ${currentPersona}：`;
 .pm-nav-left-btn{margin-right:auto;}
 .pm-nav-right{display:flex;gap:4px;justify-content:flex-end;margin-left:auto;}
 .pm-name-wrap{position:absolute !important;left:50%;top:50%;transform:translate(-50%,-50%);display:inline-flex;align-items:center;max-width:60%;pointer-events:auto;}
-.pm-name{font-weight:700 !important;color:#000 !important;font-size:15px !important;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
+.pm-name{font-weight:700 !important;font-size:15px !important;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
 .pm-name-edit{background:#f0f0f3 !important;border:none !important;color:#666 !important;cursor:pointer;padding:5px !important;line-height:1;flex-shrink:0;border-radius:50% !important;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;transition:all .2s;position:absolute;left:100%;margin-left:8px;}
 .pm-name-edit.is-hidden{display:none !important;}
 .pm-name-edit:hover{background:#007aff !important;color:#fff !important;transform:scale(1.05);}
@@ -1420,9 +2244,8 @@ ${currentPersona}：`;
 .pm-confirm-tip{flex:1;font-size:12px;color:#888;}
 .pm-confirm-btn{background:#ff3b30 !important;color:#fff !important;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;}
 .pm-cancel-btn{background:#f0f0f0 !important;color:#333 !important;border:none;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;}
-.pm-msg-list{flex:1 !important;overflow-y:auto !important;padding:12px !important;display:flex !important;flex-direction:column !important;gap:7px;background:#fff !important;min-height:0;background-size:cover;background-position:center;}
-.pm-select-wrap{display:flex !important;align-items:flex-end;gap:6px;}
-.pm-custom-check{width:20px;height:20px;border-radius:50%;border:2px solid #ccc;cursor:pointer;flex-shrink:0;margin-bottom:4px;transition:all .15s;position:relative;background:#fff !important;}
+.pm-msg-list{flex:1 !important;overflow-y:auto !important;padding:12px !important;display:flex !important;flex-direction:column !important;gap:7px;background:var(--pm-list-bg,#fff) !important;min-height:0;background-size:cover;background-position:center;}
+.pm-custom-check{position:relative;border:1.5px solid #ccc;background:transparent;box-sizing:border-box;transition:all 0.2s;}
 .pm-custom-check[data-checked="1"],.pm-custom-check.is-checked{border-color:#007aff;background:#007aff !important;}
 .pm-custom-check[data-checked="1"]::after,.pm-custom-check.is-checked::after{content:'✓';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:bold;}
 .pm-bi-style{border-color:#e0a030;}.pm-bi-style.is-checked{border-color:#ff9500;background:#ff9500 !important;}
@@ -1432,7 +2255,6 @@ ${currentPersona}：`;
 .pm-right{align-self:flex-end !important;background:var(--pm-r-bg) !important;color:var(--pm-r-txt) !important;border-bottom-right-radius:4px !important;}
 .pm-left{align-self:flex-start !important;background:var(--pm-l-bg) !important;color:var(--pm-l-txt) !important;border-bottom-left-radius:4px !important;}
 #pm-iphone[style*="--pm-frost: 1"] .pm-right,#pm-iphone[style*="--pm-frost: 1"] .pm-left{backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);}
-/* 🔧 修复 #1：群聊气泡宽度 */
 .pm-group-bubble-wrap{align-self:flex-start !important;display:flex !important;flex-direction:column !important;gap:2px;max-width:78% !important;width:fit-content !important;align-items:flex-start !important;}
 .pm-group-bubble-wrap .pm-bubble{max-width:none !important;width:auto !important;align-self:flex-start !important;}
 .pm-group-name{font-size:11px;color:#999;padding-left:6px;font-weight:500;white-space:nowrap;}
@@ -1460,7 +2282,7 @@ ${currentPersona}：`;
 .pm-voice-dur{font-size:12px;opacity:.85;min-width:34px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums;line-height:1;}
 .pm-voice-text{background:#f7f7f9;border:1px solid #e5e5e8;color:#333;padding:7px 10px;border-radius:10px;font-size:13px;line-height:1.4;max-width:220px;word-break:break-word;position:relative;}
 .pm-voice-text::before{content:'已转文字';position:absolute;top:-8px;left:8px;font-size:9px;color:#999;background:#fff;padding:0 4px;border-radius:4px;}
-.pm-input-bar{padding:8px 12px 30px !important;display:flex !important;gap:8px;border-top:1px solid #f0f0f0;align-items:center;background:#fff !important;flex-shrink:0;}
+.pm-input-bar{padding:8px 12px 30px !important;display:flex !important;gap:8px;border-top:1px solid var(--pm-navbar-border,#f0f0f0);align-items:center;background:var(--pm-navbar-bg,#fff) !important;flex-shrink:0;}
 .pm-input{flex:1 !important;min-width:0 !important;background:#f2f2f7 !important;color:#000 !important;border:none !important;border-radius:20px !important;padding:9px 14px !important;outline:none !important;font-size:14px !important;font-family:inherit !important;}
 .pm-input:disabled{opacity:.5;}
 .pm-up-btn{width:32px !important;height:32px !important;background:#007aff !important;color:#fff !important;border:none !important;border-radius:50% !important;cursor:pointer;font-size:16px !important;font-weight:bold;display:flex !important;align-items:center !important;justify-content:center !important;flex-shrink:0;}
@@ -1568,8 +2390,10 @@ ${currentPersona}：`;
     }, true);
 
     try { window.__pmHistories = JSON.parse(localStorage.getItem('ST_SMS_DATA_V2')) || {}; } catch {}
-    loadBidirectional(); loadGroupMeta();
+    loadBidirectional(); loadGroupMeta(); loadPokeConfig();
+    loadHistoriesFromIDB();
     setTimeout(() => { migrateOldHistory(); applyBidirectionalInjection(); hookGenerationEvent(); }, 1500);
 
-    console.log('[phone-mode] v8.0 五项修复');
+    console.log('[phone-mode] v9.2 夜间模式修复 + 独立API拍一拍修复 + 角色主动发消息自然化');
 })();
+
